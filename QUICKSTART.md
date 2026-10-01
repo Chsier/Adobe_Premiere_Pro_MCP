@@ -69,6 +69,11 @@ Add the MCP entry on one line:
 codex mcp add premiere_pro --env PREMIERE_TEMP_DIR=/tmp/premiere-mcp-bridge -- node /absolute/path/to/Adobe_Premiere_Pro_MCP/dist/index.js
 ```
 
+If Adobe apps are installed outside the default locations, also set
+`PREMIERE_ADOBE_ROOT` to the Adobe install root or `PREMIERE_EXE_PATH` to the
+Premiere executable. The server also reads matching values from
+`%USERPROFILE%\.codex\config.toml`.
+
 Then:
 
 1. Restart the client.

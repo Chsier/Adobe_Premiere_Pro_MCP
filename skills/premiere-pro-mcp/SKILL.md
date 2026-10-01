@@ -39,6 +39,11 @@ rules. Apply them before editing or diagnosing a live project.
   `ADOBE_AME_PATH` for an explicit executable/folder, and
   `PREMIERE_ADOBE_ROOT`, `ADOBE_ROOT`, or `ADOBE_HOME` for an Adobe install root
   that is outside the default Program Files locations.
+- Premiere discovery and auto-launch are configurable too. Set
+  `PREMIERE_EXE_PATH` to the exact executable, or `PREMIERE_INSTALL_ROOT` /
+  `PREMIERE_ADOBE_ROOT` to an install root. The server also reads matching
+  values from `<USER_HOME>\.codex\config.toml`. This is required when Premiere is
+  installed outside `%ProgramFiles%\Adobe`.
 - A long bridge command can make the panel heartbeat go stale after it was
   initially fresh. Treat that as busy, not as proof that the panel exited. Do not
   retry a render, batch, or destructive command until the panel reports

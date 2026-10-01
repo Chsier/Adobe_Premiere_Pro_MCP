@@ -12,6 +12,10 @@ All notable changes are documented here. Releases use semantic versioning.
   explicit environment/config roots, the Windows uninstall registry, conventional
   Adobe roots on other drives, and an unreadable-path fallback that does not
   block export.
+- Premiere discovery and auto-launch now honor `PREMIERE_EXE_PATH`,
+  `PREMIERE_INSTALL_ROOT`, `PREMIERE_ADOBE_ROOT`, `ADOBE_ROOT`, and
+  `ADOBE_HOME`, including values read from the local Codex config. This fixes
+  installations such as `<ADOBE_ROOT>\Pr\Adobe Premiere Pro 2025`.
 - `remove_from_timeline` now defaults to `lift`, leaving a gap. Callers must pass
   `deleteMode: "ripple"` explicitly when downstream clips should move.
 - Long bridge commands no longer turn a heartbeat that was fresh when the command

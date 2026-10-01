@@ -35,6 +35,9 @@ Premiere scripting failures:
   reports the method, direct result, output existence, and encoder availability.
 - Media Encoder discovery supports explicit paths, local configuration, the
   Windows uninstall registry, and Adobe roots outside `%ProgramFiles%`.
+- Premiere discovery and auto-launch support `PREMIERE_EXE_PATH`,
+  `PREMIERE_INSTALL_ROOT`, `PREMIERE_ADOBE_ROOT`, `ADOBE_ROOT`, and
+  `ADOBE_HOME`, including values read from the local Codex config.
 - `remove_from_timeline` defaults to `lift`; use `deleteMode: "ripple"` when
   downstream clips should move.
 - `batch_apply_effect` requires an explicit non-empty clip list and rejects

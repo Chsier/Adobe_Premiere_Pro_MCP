@@ -66,6 +66,11 @@ describe('ensureHost', () => {
 
   afterEach(() => {
     delete process.env.PREMIERE_TEMP_DIR;
+    delete process.env.PREMIERE_EXE_PATH;
+    delete process.env.PREMIERE_INSTALL_ROOT;
+    delete process.env.PREMIERE_ADOBE_ROOT;
+    delete process.env.ADOBE_ROOT;
+    delete process.env.ADOBE_HOME;
   });
 
   it('is ready when the panel heartbeat is already started', async () => {
@@ -155,7 +160,10 @@ describe('ensureHost', () => {
         if (String(target) === adobeRoot) return ['Adobe Premiere Pro 2026'] as never;
         return [] as never;
       });
-      mockFs.access.mockResolvedValue(undefined);
+      mockFs.access.mockImplementation(async (target) => {
+        if (String(target) === exe) return undefined;
+        throw new Error('missing');
+      });
       mockFs.readFile.mockRejectedValue(new Error('ENOENT'));
 
       const bridge = new PremiereProBridge();
@@ -171,6 +179,72 @@ describe('ensureHost', () => {
       expect(result.launched).toBe(true);
       expect(result.ready).toBe(false);
       expect(result.userActionRequired).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('launches Premiere from PREMIERE_EXE_PATH outside Program Files', async () => {
+    const restore = stubProcessPlatform('win32');
+    try {
+      const exe = path.win32.join(
+        'D:\\Support',
+        'Adobe',
+        'Pr',
+        'Adobe Premiere Pro 2025',
+        'Adobe Premiere Pro.exe',
+      );
+      process.env.PREMIERE_EXE_PATH = exe;
+      mockFs.access.mockImplementation(async (target) => {
+        if (String(target) === exe) return undefined;
+        throw new Error('missing');
+      });
+      mockFs.readFile.mockRejectedValue(new Error('ENOENT'));
+
+      const bridge = new PremiereProBridge();
+      await bridge.initialize();
+      const result = await bridge.ensureHost({ launchIfNeeded: true, waitMs: 20 });
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        exe,
+        [],
+        expect.objectContaining({ detached: true }),
+      );
+      expect(result.launched).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('finds Premiere under PREMIERE_INSTALL_ROOT on a nonstandard drive', async () => {
+    const restore = stubProcessPlatform('win32');
+    try {
+      const root = path.win32.join('D:\\Support', 'Adobe');
+      const nested = path.win32.join(root, 'Pr', 'Adobe Premiere Pro 2025');
+      const exe = path.win32.join(nested, 'Adobe Premiere Pro.exe');
+      process.env.PREMIERE_INSTALL_ROOT = root;
+      mockFs.readdir.mockImplementation(async (target) => {
+        if (String(target) === root) return ['Pr'] as never;
+        if (String(target) === path.win32.join(root, 'Pr')) return ['Adobe Premiere Pro 2025'] as never;
+        if (String(target) === nested) return ['Adobe Premiere Pro.exe'] as never;
+        return [] as never;
+      });
+      mockFs.access.mockImplementation(async (target) => {
+        if (String(target) === exe) return undefined;
+        throw new Error('missing');
+      });
+      mockFs.readFile.mockRejectedValue(new Error('ENOENT'));
+
+      const bridge = new PremiereProBridge();
+      await bridge.initialize();
+      const result = await bridge.ensureHost({ launchIfNeeded: true, waitMs: 20 });
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        exe,
+        [],
+        expect.objectContaining({ detached: true }),
+      );
+      expect(result.launched).toBe(true);
     } finally {
       restore();
     }

@@ -897,65 +897,185 @@ export class PremiereProBridge implements PremiereProTransport {
   }
 
   private async detectPremiereProInstallation(): Promise<void> {
-    // Scan the install root instead of hardcoding release years, so new
-    // versions (2025, 2026, ...) are detected without a code change.
-    const searchDirs = process.platform === 'win32'
+    const configured = await this.premiereDiscoveryConfig();
+    if (configured.executablePath) {
+      const resolved = await this.findPremiereInstallation(configured.executablePath);
+      if (resolved) {
+        this.premiereInstallPath = resolved.installPath;
+        this.premiereLaunchPath = resolved.launchPath;
+        this.logger.info(`Found Adobe Premiere Pro at: ${resolved.installPath}`);
+        return;
+      }
+      this.logger.warn(`Configured Adobe Premiere Pro path was not found: ${configured.executablePath}`);
+    }
+
+    // Scan explicit roots first, then the conventional install roots. This
+    // keeps the default behavior unchanged while supporting Adobe apps on any
+    // drive or under a custom parent folder.
+    const defaultRoots = process.platform === 'win32'
       ? [joinPremiereHostPath(process.env['ProgramFiles'] || 'C:\\Program Files', 'Adobe')]
       : [joinPremiereHostPath('/Applications')];
+    const searchRoots = [...configured.roots, ...defaultRoots];
+    const seenRoots = new Set<string>();
 
-    for (const dir of searchDirs) {
-      let entries: string[] = [];
-      try {
-        const listing = await fs.readdir(dir);
-        entries = Array.isArray(listing) ? listing : [];
-      } catch (error) {
-        continue; // Install root is missing on this machine
+    for (const root of searchRoots) {
+      const normalizedRoot = this.normalizePremiereConfigPath(root);
+      if (!normalizedRoot) continue;
+      const rootKey = process.platform === 'win32' ? normalizedRoot.toLowerCase() : normalizedRoot;
+      if (seenRoots.has(rootKey)) continue;
+      seenRoots.add(rootKey);
+
+      const resolved = await this.findPremiereInstallation(normalizedRoot);
+      if (resolved) {
+        this.premiereInstallPath = resolved.installPath;
+        this.premiereLaunchPath = resolved.launchPath;
+        this.logger.info(`Found Adobe Premiere Pro at: ${resolved.installPath}`);
+        return;
+      }
+    }
+
+    this.logger.warn(
+      'Adobe Premiere Pro installation not found. Set PREMIERE_EXE_PATH, ' +
+      'PREMIERE_INSTALL_ROOT, or PREMIERE_ADOBE_ROOT to the actual install location.'
+    );
+  }
+
+  private async premiereDiscoveryConfig(): Promise<{ executablePath: string | null; roots: string[] }> {
+    const config = await this.localConfigValues();
+    const readValues = (keys: string[]): string[] => {
+      const values: string[] = [];
+      for (const key of keys) {
+        for (const candidate of [process.env[key], config.get(key)]) {
+          const normalized = this.normalizePremiereConfigPath(candidate);
+          if (normalized && !values.includes(normalized)) values.push(normalized);
+        }
+      }
+      return values;
+    };
+
+    return {
+      executablePath: readValues(['PREMIERE_EXE_PATH'])[0] ?? null,
+      roots: readValues(['PREMIERE_INSTALL_ROOT', 'PREMIERE_ADOBE_ROOT', 'ADOBE_ROOT', 'ADOBE_HOME']),
+    };
+  }
+
+  private normalizePremiereConfigPath(value: string | undefined): string {
+    if (!value) return '';
+    const trimmed = value.trim().replace(/^["']|["']$/g, '');
+    if (!trimmed) return '';
+    const normalized = process.platform === 'win32'
+      ? pathWin32.normalize(trimmed.replace(/\//g, '\\'))
+      : pathPosix.normalize(trimmed);
+    return normalized.length > 3 ? normalized.replace(/[\\/]+$/, '') : normalized;
+  }
+
+  private async findPremiereInstallation(
+    root: string
+  ): Promise<{ installPath: string; launchPath: string } | null> {
+    const normalizedRoot = this.normalizePremiereConfigPath(root);
+    if (!normalizedRoot) return null;
+
+    const directLaunch = await this.resolvePremiereLaunchPath(normalizedRoot);
+    if (directLaunch) return directLaunch;
+
+    const queue: Array<{ directory: string; depth: number }> = [
+      { directory: normalizedRoot, depth: 0 },
+    ];
+    const visited = new Set<string>();
+    let visitedCount = 0;
+
+    while (queue.length > 0 && visitedCount < 256) {
+      const current = queue.shift();
+      if (!current) break;
+      const visitKey = process.platform === 'win32'
+        ? current.directory.toLowerCase()
+        : current.directory;
+      if (visited.has(visitKey)) continue;
+      visited.add(visitKey);
+      visitedCount++;
+
+      if (process.platform === 'win32') {
+        const conventionalExe = joinPremiereHostPath(current.directory, 'Adobe Premiere Pro.exe');
+        try {
+          await fs.access(conventionalExe);
+          return { installPath: current.directory, launchPath: conventionalExe };
+        } catch {
+          // The executable is not directly inside this directory; keep scanning.
+        }
       }
 
-      // Newest release first, e.g. "Adobe Premiere Pro 2026" before "... 2024"
-      const candidates = entries
-        .filter(entry => entry.startsWith('Adobe Premiere Pro'))
+      let entries: string[] = [];
+      try {
+        const listing = await fs.readdir(current.directory);
+        entries = Array.isArray(listing) ? listing as string[] : [];
+      } catch {
+        continue;
+      }
+
+      // Prefer the newest release when several versions are present.
+      entries = entries
+        .filter((entry) => !entry.startsWith('.'))
         .sort()
         .reverse();
 
-      for (const candidate of candidates) {
-        const installPath = joinPremiereHostPath(dir, candidate);
-        try {
-          await fs.access(installPath);
-          const launchPath = await this.findPremiereLaunchPath(installPath);
-          this.premiereInstallPath = installPath;
-          if (launchPath) this.premiereLaunchPath = launchPath;
-          this.logger.info(`Found Adobe Premiere Pro at: ${installPath}`);
-          return;
-        } catch {
-          // Continue checking other candidates
+      for (const entry of entries) {
+        const fullPath = joinPremiereHostPath(current.directory, entry);
+        if (process.platform === 'win32') {
+          if (/^Adobe Premiere Pro(?: \d+(?:\.\d+)*)?\.exe$/i.test(entry)) {
+            try {
+              await fs.access(fullPath);
+              return { installPath: current.directory, launchPath: fullPath };
+            } catch {
+              continue;
+            }
+          }
+        } else if (process.platform === 'darwin') {
+          if (/^Adobe Premiere Pro(?: \d+(?:\.\d+)*)?\.app$/i.test(entry)) {
+            try {
+              await fs.access(fullPath);
+              return { installPath: fullPath, launchPath: fullPath };
+            } catch {
+              continue;
+            }
+          }
+        }
+
+        if (current.depth < 3) {
+          queue.push({ directory: fullPath, depth: current.depth + 1 });
         }
       }
     }
 
-    this.logger.warn('Adobe Premiere Pro installation not found in common paths');
+    return null;
   }
 
-  private async findPremiereLaunchPath(installPath: string): Promise<string | null> {
-    if (process.platform === 'darwin') {
+  private async resolvePremiereLaunchPath(
+    candidate: string
+  ): Promise<{ installPath: string; launchPath: string } | null> {
+    const normalized = this.normalizePremiereConfigPath(candidate);
+    if (!normalized) return null;
+    const basename = process.platform === 'win32'
+      ? pathWin32.basename(normalized)
+      : pathPosix.basename(normalized);
+
+    if (process.platform === 'win32' && /^Adobe Premiere Pro(?: \d+(?:\.\d+)*)?\.exe$/i.test(basename)) {
       try {
-        const listing = await fs.readdir(installPath);
-        const app = listing.find((entry) => entry.endsWith('.app'));
-        if (app) return joinPremiereHostPath(installPath, app);
-      } catch {
-        return installPath;
-      }
-      return installPath;
-    }
-    if (process.platform === 'win32') {
-      const exe = joinPremiereHostPath(installPath, 'Adobe Premiere Pro.exe');
-      try {
-        await fs.access(exe);
-        return exe;
+        await fs.access(normalized);
+        return { installPath: pathWin32.dirname(normalized), launchPath: normalized };
       } catch {
         return null;
       }
     }
+
+    if (process.platform === 'darwin' && /^Adobe Premiere Pro(?: \d+(?:\.\d+)*)?\.app$/i.test(basename)) {
+      try {
+        await fs.access(normalized);
+        return { installPath: normalized, launchPath: normalized };
+      } catch {
+        return null;
+      }
+    }
+
     return null;
   }
 
@@ -2307,7 +2427,9 @@ export class PremiereProBridge implements PremiereProTransport {
     const configPath = pathWin32.join(home, '.codex', 'config.toml');
     let content = '';
     try {
-      content = await fs.readFile(configPath, 'utf8');
+      const loaded = await fs.readFile(configPath, 'utf8');
+      if (typeof loaded !== 'string') return values;
+      content = loaded;
     } catch {
       return values;
     }

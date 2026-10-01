@@ -234,7 +234,12 @@ export function getExpandedTools(existingNames: Set<string>): MCPTool[] {
     .filter((name) => !existingNames.has(name))
     .map((name) => {
       let inputSchema: z.ZodTypeAny = z.record(z.string(), z.any());
-      if (EXPANDED_REQUIRED_CLIP_ID.has(name)) {
+      if (name === 'batch_apply_effect') {
+        inputSchema = z.object({
+          clips: z.array(z.union([z.string(), z.object({ clipId: z.string().min(1) })])).min(1).describe('Timeline clip ids to receive the effect'),
+          effectName: z.string().min(1).describe('Effect to apply'),
+        }).passthrough();
+      } else if (EXPANDED_REQUIRED_CLIP_ID.has(name)) {
         inputSchema = z.object({ clipId: z.string().min(1).describe('Timeline clip id') }).passthrough();
       } else if (EXPANDED_REQUIRED_PROJECT_ITEM_ID.has(name)) {
         inputSchema = z.object({
@@ -243,11 +248,16 @@ export function getExpandedTools(existingNames: Set<string>): MCPTool[] {
       }
       return {
         name,
-        description: `Premiere Pro expanded operation: ${name.replace(/_/g, ' ')}.`,
+        description: EXPANDED_TOOL_DESCRIPTION_OVERRIDES[name] ?? `Premiere Pro expanded operation: ${name.replace(/_/g, ' ')}.`,
         inputSchema,
       };
     });
 }
+
+const EXPANDED_TOOL_DESCRIPTION_OVERRIDES: Record<string, string> = {
+  execute_extendscript:
+    'Executes caller-authored ExtendScript in Premiere. The body is wrapped in an IIFE, so use an explicit return to send a value back; a bare expression returns undefined.'
+};
 
 export function isExpandedTool(name: string): boolean {
   return (expandedToolNames as readonly string[]).includes(name);
@@ -393,27 +403,17 @@ async function createGeneratedBarsAndTone(bridge: PremiereProTransport, args: Re
   };
 }
 
-async function createGeneratedAdjustmentLayer(bridge: PremiereProTransport, args: Record<string, any>): Promise<any> {
-  const width = Number(args.width || 1920);
-  const height = Number(args.height || 1080);
-  const filePath = await writeGeneratedPng(`adjustment-layer-${Date.now()}.png`, width, height, () => [0, 0, 0, 0]);
-  const imported = await bridge.importMedia(filePath);
-  let placement = null;
-  if (args.sequenceId) {
-    placement = await bridge.addToTimeline(String(args.sequenceId), imported.id, Number(args.trackIndex || 1), Number(args.time || args.start || 0), false);
-  }
+async function createGeneratedAdjustmentLayer(_bridge: PremiereProTransport, _args: Record<string, any>): Promise<any> {
+  // Premiere 25/26 does not expose a scriptable adjustment-layer item in the
+  // tested builds. A transparent PNG is not an adjustment layer: effects applied
+  // to it do not pass through to lower tracks. Fail closed instead of placing a
+  // plausible-looking clip that silently does nothing.
   return {
-    success: true,
+    success: false,
     tool: 'add_adjustment_layer',
-    data: {
-      created: true,
-      mediaType: 'generated_transparent_png',
-      item: imported,
-      placement,
-      path: filePath,
-      width,
-      height
-    }
+    reason: 'ADJUSTMENT_LAYER_REQUIRES_MANUAL_CREATION',
+    error: 'This build cannot create a real Premiere adjustment layer. Create one manually with File > New > Adjustment Layer, then place it with add_to_timeline. A generated transparent PNG is deliberately not used because it does not pass effects through.',
+    retry: false
   };
 }
 
@@ -1671,8 +1671,61 @@ function buildExpandedToolScript(name: string, args: Record<string, any>): strin
           if (!args.clipId && !args.node_id && !args.nodeId) return fail("ripple_delete requires clipId.");
           var rippleClip = findClip(args.clipId || args.node_id || args.nodeId);
           if (!rippleClip) return fail(pendingSequenceError || "Clip not found");
+          var rippleTrack = rippleClip.track;
+          var rippleRemovedId = String(rippleClip.clip.nodeId);
+          var rippleRemovedEnd = valueOfTime(rippleClip.clip.end);
+          var rippleNextId = null;
+          var rippleNextStartBefore = null;
+          for (var rippleScan = 0; rippleScan < rippleTrack.clips.numItems; rippleScan++) {
+            var rippleCandidate = rippleTrack.clips[rippleScan];
+            if (String(rippleCandidate.nodeId) === rippleRemovedId) continue;
+            var rippleCandidateStart = valueOfTime(rippleCandidate.start);
+            if (rippleCandidateStart >= rippleRemovedEnd - 0.0005 && (rippleNextStartBefore === null || rippleCandidateStart < rippleNextStartBefore)) {
+              rippleNextId = String(rippleCandidate.nodeId);
+              rippleNextStartBefore = rippleCandidateStart;
+            }
+          }
+          var rippleEndBefore = valueOfTime(rippleClip.sequence.end);
           rippleClip.clip.remove(true, true);
-          return ok({ removed: true, ripple: true, clipId: args.clipId || args.node_id || args.nodeId });
+          var rippleNextStartAfter = null;
+          if (rippleNextId !== null) {
+            for (var rippleScanAfter = 0; rippleScanAfter < rippleTrack.clips.numItems; rippleScanAfter++) {
+              var rippleAfter = rippleTrack.clips[rippleScanAfter];
+              if (String(rippleAfter.nodeId) === rippleNextId) {
+                rippleNextStartAfter = valueOfTime(rippleAfter.start);
+                break;
+              }
+            }
+          }
+          var rippleEndAfter = valueOfTime(rippleClip.sequence.end);
+          var rippleMoved = rippleNextId !== null
+            ? (rippleNextStartAfter !== null && rippleNextStartAfter < rippleNextStartBefore - 0.0005)
+            : (rippleEndAfter < rippleEndBefore - 0.0005);
+          if (!rippleMoved) {
+            return fail("Premiere removed the clip but no downstream ripple was verified; the gap may remain. Verify linked audio and use add_to_timeline_batch to rebuild kept ranges if a guaranteed close is required.", {
+              removed: true,
+              ripple: false,
+              rippleVerified: true,
+              sequenceEndBefore: rippleEndBefore,
+              sequenceEndAfter: rippleEndAfter,
+              nextItemId: rippleNextId,
+              nextItemStartBefore: rippleNextStartBefore,
+              nextItemStartAfter: rippleNextStartAfter,
+              linkedAudioMayRemain: true
+            });
+          }
+          return ok({
+            removed: true,
+            ripple: true,
+            rippleVerified: true,
+            clipId: args.clipId || args.node_id || args.nodeId,
+            sequenceEndBefore: rippleEndBefore,
+            sequenceEndAfter: rippleEndAfter,
+            nextItemId: rippleNextId,
+            nextItemStartBefore: rippleNextStartBefore,
+            nextItemStartAfter: rippleNextStartAfter,
+            linkedAudioMayRemain: true
+          });
 
         case "roll_edit":
         case "slide_edit":
@@ -2098,6 +2151,30 @@ function buildExpandedToolScript(name: string, args: Record<string, any>): strin
           if (seqErr) return fail(seqErr);
           var batchSeq = targetSequence();
           if (!batchSeq) return fail("No active sequence");
+          if (!args.clips || !(args.clips instanceof Array) || !args.clips.length) return fail("batch_apply_effect requires a non-empty clips array");
+          var requestedBatchIds = [];
+          for (var bri = 0; bri < args.clips.length; bri++) {
+            var requestedBatchId = typeof args.clips[bri] === "string" ? args.clips[bri] : args.clips[bri] && args.clips[bri].clipId;
+            if (!requestedBatchId) return fail("batch_apply_effect requires a clipId for every clip");
+            requestedBatchIds.push(String(requestedBatchId));
+          }
+          var allBatchClips = allClips(batchSeq);
+          var batchClips = [];
+          for (var bci = 0; bci < requestedBatchIds.length; bci++) {
+            var matchedBatchClip = null;
+            for (var bcj = 0; bcj < allBatchClips.length; bcj++) {
+              if (__idsMatch(allBatchClips[bcj].clip.nodeId, requestedBatchIds[bci])) {
+                matchedBatchClip = allBatchClips[bcj];
+                break;
+              }
+            }
+            if (!matchedBatchClip) return fail("Clip not found in sequence: " + requestedBatchIds[bci]);
+            var alreadyRequested = false;
+            for (var bck = 0; bck < batchClips.length; bck++) {
+              if (batchClips[bck] === matchedBatchClip) { alreadyRequested = true; break; }
+            }
+            if (!alreadyRequested) batchClips.push(matchedBatchClip);
+          }
           app.enableQE();
           // Resolved once, outside the loop: qeSequenceFor() scans every QE
           // sequence, so doing it per clip made the tool O(clips x sequences),
@@ -2106,7 +2183,6 @@ function buildExpandedToolScript(name: string, args: Record<string, any>): strin
           // whole batch instead of recording one clip's error and continuing.
           var qeBatchSeq = qeSequenceFor(batchSeq);
           if (!qeBatchSeq) return fail("Could not address sequence '" + batchSeq.name + "' through the QE API.");
-          var batchClips = allClips(batchSeq);
           var batchResults = [];
           for (var bai = 0; bai < batchClips.length; bai++) {
             try {

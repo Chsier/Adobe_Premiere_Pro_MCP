@@ -41,11 +41,11 @@ export const timelineTools: ToolModule[] = [
   },
   {
     name: 'remove_from_timeline',
-    description: 'Removes a clip from the timeline. Pass sequenceId when the clip ID came from list_sequence_tracks for a non-active sequence.',
+    description: 'Removes a clip from the timeline. Defaults to a lift, which leaves a gap; pass deleteMode:"ripple" to close the gap and shift later clips left. Pass sequenceId when the clip ID came from list_sequence_tracks for a non-active sequence.',
     inputSchema: z.object({
       clipId: z.string().describe('The ID of the clip on the timeline to remove'),
       sequenceId: z.string().optional().describe('Optional sequence ID to search. If omitted, searches the active sequence first, then all sequences.'),
-      deleteMode: z.enum(['ripple', 'lift']).optional().describe('Whether to ripple delete (close gap) or lift (leave gap)')
+      deleteMode: z.enum(['ripple', 'lift']).optional().describe('Deletion mode. Defaults to lift (leave a gap); use ripple to close the gap and shift later clips.')
     }),
     run: (ctx, args) => removeFromTimeline(ctx, args.clipId, args.sequenceId, args.deleteMode),
   },
@@ -298,7 +298,7 @@ export async function addToTimeline(ctx: ToolContext, sequenceId: string, projec
   }
 }
 
-async function removeFromTimeline(ctx: ToolContext, clipId: string, sequenceId?: string, deleteMode = 'ripple'): Promise<any> {
+async function removeFromTimeline(ctx: ToolContext, clipId: string, sequenceId?: string, deleteMode = 'lift'): Promise<any> {
   const script = `
       try {
         var info = __findClip(${JSON.stringify(clipId)}, ${sequenceId ? JSON.stringify(sequenceId) : 'null'});

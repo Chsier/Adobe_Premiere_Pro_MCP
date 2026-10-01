@@ -356,7 +356,9 @@ async function verifyPremiereConnection(ctx: ToolContext, launchIfNeeded = true)
             id: sequence.sequenceID,
             name: sequence.name
           } : null,
-          readOnly: true
+          readOnly: null,
+          readOnlySource: 'unavailable',
+          readOnlyNote: 'Premiere ExtendScript does not expose a reliable project read-only flag. If saving is blocked, use save_project_as instead of treating this field as a lock indicator.'
         });
       } catch (e) {
         return JSON.stringify({

@@ -99,6 +99,14 @@ describe('PremiereProTools', () => {
         expect(typeof tool.description).toBe('string');
         expect(tool.inputSchema).toBeDefined();
       }
+
+      const availableTools = tools.getAvailableTools();
+      expect(availableTools.find((tool) => tool.name === 'remove_from_timeline')?.description)
+        .toContain('Defaults to a lift');
+      expect(availableTools.find((tool) => tool.name === 'execute_extendscript')?.description)
+        .toContain('explicit return');
+      expect(availableTools.find((tool) => tool.name === 'apply_effect')?.description)
+        .toContain('parameters key');
     });
   });
 
@@ -676,7 +684,8 @@ describe('PremiereProTools', () => {
         status: 'connected',
         bridge: 'responsive',
         premiere: { version: '26.0', build: '123' },
-        readOnly: true
+        readOnly: null,
+        readOnlySource: 'unavailable'
       });
 
       const result = await tools.executeTool('verify_premiere_connection', {});
@@ -685,7 +694,9 @@ describe('PremiereProTools', () => {
       expect(mockBridge.executeScript.mock.calls[0][1]).toBe(8000);
       const script = mockBridge.executeScript.mock.calls[0][0] as string;
       expect(script).toContain("status: 'connected'");
-      expect(script).toContain('readOnly: true');
+      expect(script).toContain('readOnly: null');
+      expect(script).toContain("readOnlySource: 'unavailable'");
+      expect(script).toContain('readOnlyNote:');
       expect(script).not.toContain('save()');
       expect(script).not.toContain('create');
     });
@@ -1363,6 +1374,58 @@ describe('PremiereProTools', () => {
       expect(script).toContain('__coercePropertyValue');
     });
 
+    it('rejects apply_effect misspelled keys instead of silently dropping them', async () => {
+      mockBridge.executeScript.mockResolvedValue({ success: true });
+      const result = await tools.executeTool('apply_effect', {
+        clipId: 'clip-123',
+        effectName: 'Lumetri Color',
+        properties: { Temperature: 100 }
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Invalid arguments');
+      expect(mockBridge.executeScript).not.toHaveBeenCalled();
+    });
+
+    it('requires an explicit clips list for batch_apply_effect and keeps the selection', async () => {
+      const missing = await tools.executeTool('batch_apply_effect', {
+        effectName: 'Lumetri Color'
+      });
+
+      expect(missing.success).toBe(false);
+      expect(mockBridge.executeScript).not.toHaveBeenCalled();
+
+      mockBridge.executeScript.mockResolvedValue({ success: true });
+      await tools.executeTool('batch_apply_effect', {
+        clips: ['clip-1'],
+        effectName: 'Lumetri Color'
+      });
+
+      const script = mockBridge.executeScript.mock.calls[0][0];
+      expect(script).toContain('requestedBatchIds');
+      expect(script).toContain('Clip not found in sequence:');
+    });
+
+    it('fails closed for add_adjustment_layer instead of placing an inert PNG', async () => {
+      const result = await tools.executeTool('add_adjustment_layer', {});
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toBe('ADJUSTMENT_LAYER_REQUIRES_MANUAL_CREATION');
+      expect(mockBridge.importMedia).not.toHaveBeenCalled();
+      expect(mockBridge.addToTimeline).not.toHaveBeenCalled();
+    });
+
+    it('reads back ripple_delete movement instead of echoing ripple:true', async () => {
+      mockBridge.executeScript.mockResolvedValue({ success: true });
+
+      await tools.executeTool('ripple_delete', { clipId: 'clip-123' });
+
+      const script = mockBridge.executeScript.mock.calls[0][0];
+      expect(script).toContain('rippleNextStartBefore');
+      expect(script).toContain('rippleVerified');
+      expect(script).toContain('linkedAudioMayRemain');
+    });
+
     it('returns an explicit unsupported result for caption track deletion', async () => {
       const result = await tools.executeTool('delete_track', {
         sequenceId: 'seq-123',
@@ -1854,6 +1917,20 @@ describe('PremiereProTools', () => {
       expect(result.success).toBe(true);
       expect(mockBridge.executeScript).toHaveBeenCalledWith(expect.stringContaining('__findClip("clip-123", "seq-456")'));
       expect(mockBridge.executeScript).toHaveBeenCalledWith(expect.stringContaining('var isRipple = "lift" === "ripple";'));
+    });
+
+    it('defaults remove_from_timeline to a lift instead of moving downstream clips', async () => {
+      mockBridge.executeScript.mockResolvedValue({ success: true, clipId: 'clip-123' });
+
+      const result = await tools.executeTool('remove_from_timeline', {
+        clipId: 'clip-123',
+        sequenceId: 'seq-456',
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockBridge.executeScript).toHaveBeenCalledWith(
+        expect.stringContaining('var isRipple = "lift" === "ripple";'),
+      );
     });
   });
 
@@ -2347,6 +2424,71 @@ describe('PremiereProTools', () => {
         presetPath,
         { sourceRange: 'entire', removeOnCompletion: true },
       );
+    });
+
+    it('reports a direct Premiere render without AME queue wording', async () => {
+      const { presetPath, outputPath } = await createTempPreset();
+      mockBridge.renderSequence.mockResolvedValue({
+        success: true,
+        status: 'rendered',
+        rendered: true,
+        method: 'exportAsMediaDirect',
+        directAttempted: true,
+        directResult: 'No Error',
+        outputExists: true,
+        outputPath,
+        presetPath,
+        sourceRange: 'entire',
+        resolvedRange: { in: 0, out: 15, inMarked: false, outMarked: false },
+        encoderRangeConstant: 'ENCODE_ENTIRE',
+        directWorkAreaType: 0,
+        mediaEncoderAvailable: false,
+      });
+
+      const result = await tools.executeTool('export_sequence', {
+        sequenceId: 'seq-1',
+        outputPath,
+        presetPath,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.method).toBe('exportAsMediaDirect');
+      expect(result.rendered).toBe(true);
+      expect(result.directResult).toBe('No Error');
+      expect(result.outputExists).toBe(true);
+      expect(result.message).toMatch(/rendered directly/);
+      expect(result.message).not.toMatch(/queued/);
+    });
+
+    it('reports the container the preset actually wrote when the extension differs', async () => {
+      const { root, presetPath, outputPath } = await createTempPreset();
+      const movPath = join(root, 'out.mov');
+      await fs.writeFile(movPath, Buffer.from([0x00, 0x00, 0x00, 0x00]));
+      mockBridge.renderSequence.mockResolvedValue({
+        success: true,
+        status: 'rendered',
+        rendered: true,
+        method: 'exportAsMediaDirect',
+        directResult: 'No Error',
+        outputExists: false,
+        outputPath,
+        presetPath,
+        sourceRange: 'entire',
+      });
+
+      const result = await tools.executeTool('export_sequence', {
+        sequenceId: 'seq-1',
+        outputPath,
+        presetPath,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.artifactPath).toBe(movPath);
+      expect(result.artifactExtensionMismatch).toBe(true);
+      expect(result.outputExists).toBe(true);
+      expect(result.warnings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'EXPORT_EXTENSION_MISMATCH' }),
+      ]));
     });
 
     it('passes requested sourceRange and removeOnCompletion to the bridge', async () => {

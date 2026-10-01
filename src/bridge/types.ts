@@ -41,14 +41,22 @@ export interface PremiereProTransport {
   }): Promise<{
     success: boolean;
     status?: string;
+    method?: string;
+    rendered?: boolean;
     queued?: boolean;
     queueStarted?: boolean;
     jobID?: string;
+    directAttempted?: boolean;
+    directResult?: string;
+    outputExists?: boolean;
     outputPath?: string;
     presetPath?: string;
     sourceRange?: string;
     resolvedRange?: unknown;
     encoderRangeConstant?: string;
+    directWorkAreaType?: number;
+    mediaEncoderAvailable?: boolean;
+    code?: string;
     warnings?: Array<{ code: string; message: string }>;
     error?: string;
   }>;

@@ -11,12 +11,12 @@ import { ClipTransitionDurationSchema, ClipTransitionPositionSchema } from '../s
 export const effectsTools: ToolModule[] = [
   {
     name: 'apply_effect',
-    description: 'Applies a visual or audio effect to a clip, identifies the exact newly created component, and verifies parameter readbacks.',
+    description: 'Applies a visual or audio effect to a clip, identifies the exact newly created component, and verifies parameter readbacks. Pass effect settings under the parameters key; unknown top-level keys are rejected instead of being silently dropped.',
     inputSchema: z.object({
       clipId: z.string().describe('The ID of the clip to apply the effect to'),
       effectName: z.string().describe('The name of the effect to apply (e.g., "Gaussian Blur", "Lumetri Color")'),
       parameters: z.record(z.string(), z.any()).optional().describe('Key-value pairs for the effect\'s parameters')
-    }),
+    }).strict(),
     run: (ctx, args) => applyEffect(ctx, args.clipId, args.effectName, args.parameters),
   },
   {

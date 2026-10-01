@@ -6,7 +6,7 @@
  */
 import { z } from 'zod';
 import { constants as fsConstants, promises as fs } from 'node:fs';
-import { dirname, extname, isAbsolute, parse } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, parse } from 'node:path';
 import type { ToolContext, ToolModule } from '../context.js';
 import { EncoderPresetEntry, getEncoderPresets } from './discovery.js';
 
@@ -204,6 +204,73 @@ function deprecatedExportOptionWarnings(format?: string, quality?: string, resol
   return warnings;
 }
 
+interface ExportArtifact {
+  path: string;
+  kind: 'file' | 'directory';
+  size: number | null;
+  modifiedAt: number;
+  isRequestedPath: boolean;
+}
+
+/**
+ * A .epr preset controls the real container. Adobe presets can therefore write
+ * `requested.mp4` as `requested.mov`, or as a folder bundle with the requested
+ * stem. Verify the immediate output directory after a direct render instead of
+ * reporting the requested suffix as the produced artifact.
+ */
+async function findExportArtifact(outputPath: string, sinceMs: number): Promise<ExportArtifact | null> {
+  const outputDirectory = dirname(outputPath);
+  const requestedName = basename(outputPath);
+  const requestedStem = parse(requestedName).name;
+  const requestedLower = requestedName.toLowerCase();
+  const requestedStemLower = requestedStem.toLowerCase();
+
+  let entries;
+  try {
+    entries = await fs.readdir(outputDirectory, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const candidates: ExportArtifact[] = [];
+  for (const entry of entries) {
+    const lowerName = entry.name.toLowerCase();
+    const isRequestedPath = lowerName === requestedLower;
+    if (!isRequestedPath) {
+      if (lowerName.startsWith('.') || lowerName.endsWith('.xmp')) continue;
+      if (parse(entry.name).name.toLowerCase() !== requestedStemLower) continue;
+    }
+
+    const artifactPath = join(outputDirectory, entry.name);
+    let stat;
+    try {
+      stat = await fs.stat(artifactPath);
+    } catch {
+      continue;
+    }
+
+    // An exact requested path may legitimately predate the call when
+    // allowOverwrite was explicitly requested. Same-stem variants must be
+    // recent, otherwise an old sibling file could be mistaken for this render.
+    if (!isRequestedPath && stat.mtimeMs < sinceMs - 1500) continue;
+
+    candidates.push({
+      path: artifactPath,
+      kind: stat.isDirectory() ? 'directory' : 'file',
+      size: stat.isFile() ? stat.size : null,
+      modifiedAt: stat.mtimeMs,
+      isRequestedPath,
+    });
+  }
+
+  candidates.sort((left, right) => {
+    if (left.isRequestedPath !== right.isRequestedPath) return left.isRequestedPath ? -1 : 1;
+    if (left.kind !== right.kind) return left.kind === 'file' ? -1 : 1;
+    return right.modifiedAt - left.modifiedAt;
+  });
+  return candidates[0] ?? null;
+}
+
 async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promise<any> {
   const {
     sequenceId,
@@ -259,6 +326,7 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
   }
 
   try {
+    const exportStartedAt = Date.now();
     // bridge.renderSequence returns a structured response; propagate it instead
     // of unconditionally claiming success. Pre-fix wrapper reported success even
     // when AME never received the job (false-success false positives).
@@ -284,10 +352,72 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
       };
     }
 
+    const artifact = await findExportArtifact(outputPath, exportStartedAt);
+    const bridgeReportedOutput = result?.outputExists === true;
+    const requestedOutputExists = bridgeReportedOutput || artifact?.isRequestedPath === true;
+    const artifactPath = artifact?.path ?? (bridgeReportedOutput ? outputPath : undefined);
+    const artifactExists = Boolean(artifactPath);
+    const renderedDirectly =
+      result?.rendered === true ||
+      result?.method === 'exportAsMediaDirect' ||
+      result?.status === 'rendered';
+    const artifactExtension = artifactPath && artifact?.kind === 'file'
+      ? extname(artifactPath).toLowerCase()
+      : undefined;
+    const requestedExtension = extname(outputPath).toLowerCase();
+    const extensionMismatch = Boolean(
+      artifactExtension &&
+      requestedExtension &&
+      artifactExtension !== requestedExtension &&
+      !requestedOutputExists
+    );
+    const finalWarnings: Array<{ code: string; message: string; value?: string }> = [
+      ...warnings,
+      ...(result?.warnings ?? []),
+    ];
+    if (extensionMismatch && artifactPath) {
+      finalWarnings.push({
+        code: 'EXPORT_EXTENSION_MISMATCH',
+        message: `The .epr preset wrote ${artifactPath} instead of the requested ${outputPath}. Probe the actual artifact path.`,
+        value: artifactPath,
+      });
+    }
+    if (renderedDirectly && !artifactExists) {
+      finalWarnings.push({
+        code: 'EXPORT_ARTIFACT_NOT_FOUND',
+        message: 'Premiere reported a direct render, but no requested or same-stem artifact was found in the output directory. Inspect the directory before reporting completion.',
+        value: outputPath,
+      });
+      return {
+        success: false,
+        status: 'unverified',
+        error: 'Premiere reported a successful direct render, but no output artifact could be verified on disk.',
+        sequenceId,
+        outputPath,
+        presetPath,
+        presetName,
+        presetResolution: presetResolution.presetResolution,
+        sourceRange,
+        resolvedRange: result?.resolvedRange,
+        method: result?.method,
+        rendered: true,
+        directResult: result?.directResult,
+        requestedOutputExists,
+        artifactExists: false,
+        artifactPath: undefined,
+        outputExists: false,
+        allowOverwrite,
+        warnings: finalWarnings,
+        verify: `Get-ChildItem -LiteralPath '${dirname(outputPath)}' | Sort-Object LastWriteTime -Descending | Select-Object -First 20`,
+      };
+    }
+
     return {
       success: true,
       status: result?.status ?? 'queued',
-      message: 'Sequence queued in Adobe Media Encoder. Render runs asynchronously — verify by checking the output file size growth.',
+      message: renderedDirectly
+        ? `Sequence rendered directly by Premiere. Verified artifact: ${artifactPath ?? outputPath}.`
+        : 'Sequence queued in Adobe Media Encoder. The .epr preset controls the actual container and extension; verify the output directory rather than only the requested path.',
       sequenceId,
       outputPath,
       presetPath,
@@ -296,15 +426,29 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
       sourceRange,
       resolvedRange: result?.resolvedRange,
       encoderRangeConstant: result?.encoderRangeConstant,
+      method: result?.method,
+      rendered: result?.rendered ?? renderedDirectly,
+      directAttempted: result?.directAttempted,
+      directResult: result?.directResult,
+      requestedOutputExists,
+      artifactExists,
+      artifactPath,
+      artifactKind: artifact?.kind,
+      artifactExtensionMismatch: extensionMismatch,
+      outputExists: artifactExists || bridgeReportedOutput,
+      directWorkAreaType: result?.directWorkAreaType,
+      mediaEncoderAvailable: result?.mediaEncoderAvailable,
       removeOnCompletion,
       format,
       quality,
       resolution,
-      warnings: [...warnings, ...(result?.warnings ?? [])],
+      warnings: finalWarnings,
       jobID: result?.jobID,
       queued: result?.queued,
       queueStarted: result?.queueStarted,
-      verify: `ffprobe -show_entries format=duration,size '${outputPath}'`,
+      verify: renderedDirectly
+        ? `ffprobe -show_entries format=duration,size '${artifactPath ?? outputPath}'`
+        : `Get-ChildItem -LiteralPath '${dirname(outputPath)}' | Sort-Object LastWriteTime -Descending | Select-Object -First 10; # then ffprobe the actual file (the preset may change the extension)`,
     };
   } catch (error) {
     return {

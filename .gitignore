@@ -13,6 +13,9 @@ dist/
 release-artifacts/
 *.p12
 *.zxp
+bridge/
+.rnd/
+.tools/
 
 # Worktrees
 .worktrees/

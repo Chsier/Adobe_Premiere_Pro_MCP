@@ -126,6 +126,15 @@ describe('PremiereProBridge', () => {
     mockFs.writeFile.mockResolvedValue(undefined);
     mockFs.readFile.mockResolvedValue(JSON.stringify({ success: true }));
     mockFs.unlink.mockResolvedValue(undefined);
+    // Adobe Media Encoder is discoverable, so the export guard lets the call through.
+    mockFs.readdir.mockImplementation(async (target: any) => {
+      const value = String(target);
+      if (value.endsWith('Adobe')) return ['Adobe Media Encoder 2025'] as any;
+      if (value.endsWith('Adobe Media Encoder 2025')) {
+        return ['Adobe Media Encoder.exe'] as any;
+      }
+      return [] as any;
+    });
 
     await bridge.initialize();
     await bridge.renderSequence('seq-"quoted"', '/tmp/out.mp4', '/tmp/preset.epr', {
@@ -141,10 +150,76 @@ describe('PremiereProBridge', () => {
     expect(command).toContain('encoderRangeConstant = "ENCODE_ENTIRE"');
     expect(command).toContain('var removeOnCompletion = 0;');
     expect(command).toContain('app.encoder[encoderRangeConstant]');
+    expect(command).toContain('sequence.exportAsMediaDirect(outputPath, presetPath, directWorkAreaType)');
+    expect(command).toContain('if (sourceRange === "in_out") directWorkAreaType = 1;');
+    expect(command).toContain('if (sourceRange === "work_area") directWorkAreaType = 2;');
+    expect(command).toContain('ENCODE_SEQUENCE_FAILED');
     expect(command).not.toContain('__findSequence("seq-"quoted"")');
   });
 
-  it('blocks AME rendering before Premiere when Media Encoder is not installed', async () => {
+  it('honours PREMIERE_ADOBE_ROOT when Media Encoder lives outside Program Files', async () => {
+    const bridge = new PremiereProBridge();
+    const previousRoot = process.env.PREMIERE_ADOBE_ROOT;
+    process.env.PREMIERE_ADOBE_ROOT = 'D:\\Support\\Adobe';
+
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.access.mockRejectedValue(new Error('Not found'));
+    mockFs.writeFile.mockResolvedValue(undefined);
+    mockFs.readFile.mockResolvedValue(JSON.stringify({ success: true }));
+    mockFs.unlink.mockResolvedValue(undefined);
+    mockFs.readdir.mockImplementation(async (target: any) => {
+      const value = String(target).replace(/\//g, '\\');
+      if (value === 'D:\\Support\\Adobe') return ['Adobe Media Encoder 2025'] as any;
+      if (value === 'D:\\Support\\Adobe\\Adobe Media Encoder 2025') {
+        return ['Adobe Media Encoder.exe'] as any;
+      }
+      return [] as any;
+    });
+
+    try {
+      await bridge.initialize();
+      const result = await bridge.renderSequence('seq-1', 'D:\\out.mp4', 'D:\\preset.epr');
+
+      expect(result.code).not.toBe('MEDIA_ENCODER_NOT_INSTALLED');
+      expect(mockFs.writeFile).toHaveBeenCalled();
+    } finally {
+      if (previousRoot === undefined) delete process.env.PREMIERE_ADOBE_ROOT;
+      else process.env.PREMIERE_ADOBE_ROOT = previousRoot;
+    }
+  });
+
+  it('detects the standard macOS Creative Cloud Media Encoder folder layout', async () => {
+    const bridge = new PremiereProBridge();
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.access.mockRejectedValue(new Error('Not found'));
+    mockFs.writeFile.mockResolvedValue(undefined);
+    mockFs.readFile.mockResolvedValue(JSON.stringify({ success: true }));
+    mockFs.unlink.mockResolvedValue(undefined);
+    mockFs.readdir.mockImplementation(async (target: any) => {
+      const value = String(target);
+      if (value === '/Applications') return ['Adobe Media Encoder 2026'] as any;
+      if (value === '/Applications/Adobe Media Encoder 2026') {
+        return ['Adobe Media Encoder 2026.app'] as any;
+      }
+      return [] as any;
+    });
+
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    try {
+      await bridge.initialize();
+      await bridge.renderSequence('seq-1', '/tmp/out.mp4', '/tmp/preset.epr');
+
+      const commandFile = JSON.parse(String(mockFs.writeFile.mock.calls[0]?.[1] ?? '{}'));
+      const command = String(commandFile.script ?? '');
+      expect(command).toContain('var mediaEncoderAvailable = 1;');
+    } finally {
+      if (platformDescriptor) Object.defineProperty(process, 'platform', platformDescriptor);
+    }
+  });
+
+  it('falls back to direct Premiere export when Media Encoder is not installed', async () => {
     const bridge = new PremiereProBridge();
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
     mockFs.mkdir.mockResolvedValue(undefined);
@@ -156,10 +231,13 @@ describe('PremiereProBridge', () => {
       await bridge.initialize();
       const result = await bridge.renderSequence('seq-1', '/tmp/out.mp4', '/tmp/preset.epr');
 
-      expect(result.success).toBe(false);
-      expect(result.code).toBe('MEDIA_ENCODER_NOT_INSTALLED');
-      expect(result.error).toContain('not sent to Premiere');
-      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(mockFs.writeFile).toHaveBeenCalled();
+      const commandFile = JSON.parse(String(mockFs.writeFile.mock.calls[0]?.[1] ?? '{}'));
+      const command = String(commandFile.script ?? '');
+      expect(command).toContain('var mediaEncoderAvailable = 0;');
+      expect(command).toContain('MEDIA_ENCODER_UNAVAILABLE');
+      expect(command).toContain('sequence.exportAsMediaDirect');
     } finally {
       if (platformDescriptor) Object.defineProperty(process, 'platform', platformDescriptor);
     }

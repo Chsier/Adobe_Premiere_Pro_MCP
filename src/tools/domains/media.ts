@@ -39,9 +39,10 @@ export const mediaTools: ToolModule[] = [
     inputSchema: z.object({
       folderPath: z.string().describe('The absolute path to the folder containing media files'),
       binName: z.string().optional().describe('The name of the bin to import the media into'),
-      recursive: z.boolean().optional().describe('Whether to import from subfolders recursively')
+      recursive: z.boolean().optional().describe('Whether to import from subfolders recursively'),
+      excludeFolders: z.array(z.string()).optional().describe('Folder names to skip while walking recursively, for example ["_originals"].')
     }),
-    run: (ctx, args) => importFolder(ctx, args.folderPath, args.binName, args.recursive),
+    run: (ctx, args) => importFolder(ctx, args.folderPath, args.binName, args.recursive, args.excludeFolders),
   },
   {
     name: 'import_sequences_from_project',
@@ -141,47 +142,45 @@ async function importEdl(filePath: string): Promise<any> {
   };
 }
 
-async function importFolder(ctx: ToolContext, folderPath: string, binName?: string, recursive = false): Promise<any> {
+async function importFolder(ctx: ToolContext, folderPath: string, binName?: string, recursive = false, excludeFolders: string[] = []): Promise<any> {
   const script = `
       try {
         var folder = new Folder(${JSON.stringify(folderPath)});
-        var importedItems = [];
-        var errors = [];
-        
-        function importFiles(dir, targetBin) {
-          var files = dir.getFiles();
-          for (var i = 0; i < files.length; i++) {
-            var file = files[i];
-            if (file instanceof File) {
-              try {
-                var item = targetBin.importFiles([file.fsName]);
-                if (item && item.length > 0) {
-                  importedItems.push({
-                    name: file.name,
-                    path: file.fsName,
-                    id: item[0].nodeId
-                  });
-                }
-              } catch (e) {
-                errors.push({
-                  file: file.name,
-                  error: e.toString()
-                });
-              }
-            } else if (file instanceof Folder && ${recursive}) {
-              importFiles(file, targetBin);
+        if (!folder.exists) {
+          return JSON.stringify({
+            success: false,
+            error: "Folder not found: " + ${JSON.stringify(folderPath)}
+          });
+        }
+
+        var excludedFolders = ${JSON.stringify(excludeFolders || [])};
+        function isExcluded(folderToCheck) {
+          var name = String(folderToCheck && folderToCheck.name || "").toLowerCase();
+          for (var ei = 0; ei < excludedFolders.length; ei++) {
+            if (name === String(excludedFolders[ei]).toLowerCase()) return true;
+          }
+          return false;
+        }
+
+        var filesToImport = [];
+        function collectFiles(dir) {
+          var entries = dir.getFiles();
+          for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            if (entry instanceof File) {
+              filesToImport.push(entry.fsName);
+            } else if (entry instanceof Folder && ${recursive} && !isExcluded(entry)) {
+              collectFiles(entry);
             }
           }
         }
-        
+        collectFiles(folder);
+
         var targetBin = app.project.rootItem;
         ${binName ? `
-        // Same silent reparent as create_bin: an unresolved destination bin sent the
-        // whole import to the project root instead of failing.
+        // ProjectItemCollection is index-only. Walk children by name instead of
+        // using children["name"], and support a "parent/child" destination path.
         function __binByName(parent, wanted) {
-          // children[name] does not resolve: Premiere's ProjectItemCollection is
-          // index-only, so a string key returns undefined even when a child of that
-          // name exists. Verified against 26.0.2. Walk and compare instead.
           if (!parent || !parent.children) return null;
           for (var i = 0; i < parent.children.numItems; i++) {
             var child = parent.children[i];
@@ -189,7 +188,17 @@ async function importFolder(ctx: ToolContext, folderPath: string, binName?: stri
           }
           return null;
         }
-        targetBin = __binByName(app.project.rootItem, ${JSON.stringify(binName)});
+        function __binByPath(parent, path) {
+          var parts = String(path).split(/[\\\\/]+/);
+          var current = parent;
+          for (var pi = 0; pi < parts.length; pi++) {
+            if (!parts[pi]) continue;
+            current = __binByName(current, parts[pi]);
+            if (!current) return null;
+          }
+          return current;
+        }
+        targetBin = __binByPath(app.project.rootItem, ${JSON.stringify(binName)});
         if (!targetBin) {
           return JSON.stringify({
             success: false,
@@ -197,15 +206,37 @@ async function importFolder(ctx: ToolContext, folderPath: string, binName?: stri
             binName: ${JSON.stringify(binName)}
           });
         }` : ''}
-        
-        importFiles(folder, targetBin);
-        
+
+        if (filesToImport.length === 0) {
+          return JSON.stringify({
+            success: true,
+            imported: true,
+            importedCount: 0,
+            requestedCount: 0,
+            recursive: ${recursive},
+            excludedFolders: excludedFolders,
+            binName: ${binName ? JSON.stringify(binName) : 'null'}
+          });
+        }
+
+        // importFiles belongs to app.project, not ProjectItem. Passing the whole
+        // file list in one call avoids one round-trip per file (and was 4s for
+        // 1,398 files in the upstream reproduction).
+        if (!app.project.importFiles) {
+          return JSON.stringify({
+            success: false,
+            error: "app.project.importFiles is unavailable in this Premiere build"
+          });
+        }
+        var importSucceeded = app.project.importFiles(filesToImport, true, targetBin, false);
         return JSON.stringify({
-          success: true,
-          importedItems: importedItems,
-          errors: errors,
-          totalImported: importedItems.length,
-          totalErrors: errors.length
+          success: importSucceeded !== false,
+          imported: importSucceeded !== false,
+          importedCount: importSucceeded !== false ? filesToImport.length : 0,
+          requestedCount: filesToImport.length,
+          recursive: ${recursive},
+          excludedFolders: excludedFolders,
+          binName: ${binName ? JSON.stringify(binName) : 'null'}
         });
       } catch (e) {
         return JSON.stringify({
@@ -215,7 +246,7 @@ async function importFolder(ctx: ToolContext, folderPath: string, binName?: stri
       }
     `;
   
-  return await ctx.bridge.executeScript(script);
+  return await ctx.bridge.executeScript(script, 900000);
 }
 
 async function importSequencesFromProject(ctx: ToolContext, projectPath: string, sequenceIds: string[]): Promise<any> {

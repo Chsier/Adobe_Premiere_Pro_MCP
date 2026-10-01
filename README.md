@@ -23,6 +23,37 @@
 
 [Website](https://premiere-mcp.com/) | [Install](#install) | [Codex plugin](#codex-plugin) | [Claude Code plugin](#claude-code-plugin) | [Verify](#verify-the-install) | [Telemetry](#telemetry) | [Privacy Policy](PRIVACY.md) | [Terms of Service](TERMS.md) | [Security](SECURITY.md)
 
+## Fork Hardening
+
+This fork tracks upstream `hetpatel-11/Adobe_Premiere_Pro_MCP` and keeps the same
+tool catalog and installation model. It adds verified hardening for common
+Premiere scripting failures:
+
+- `export_sequence` falls back to Premiere's direct exporter when Adobe Media
+  Encoder is unavailable or the Media Encoder queue returns no job id.
+- Windows export paths are normalized to native backslashes, and the result
+  reports the method, direct result, output existence, and encoder availability.
+- Media Encoder discovery supports explicit paths, local configuration, the
+  Windows uninstall registry, and Adobe roots outside `%ProgramFiles%`.
+- `remove_from_timeline` defaults to `lift`; use `deleteMode: "ripple"` when
+  downstream clips should move.
+- `batch_apply_effect` requires an explicit non-empty clip list and rejects
+  unknown ids before making any change.
+- `add_adjustment_layer` fails closed instead of creating a transparent PNG that
+  does not function as an adjustment layer.
+- Long-running bridge commands distinguish a busy Premiere host from a missing
+  CEP panel.
+
+This fork contains no usernames, project names, media paths, credentials, or
+machine-specific installation paths. Configure local paths with environment
+variables such as `PREMIERE_TEMP_DIR`, `PREMIERE_ADOBE_ROOT`, or
+`PREMIERE_AME_PATH`.
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete hardening summary. Verify
+changes with `npm run build` and `npm test -- --runInBand`. Destructive timeline
+behavior should be validated only in a disposable project or a duplicated
+sequence.
+
 ## Install
 
 The supported bridge is the included **CEP panel**. Install the npm package on the same computer as Premiere Pro and your MCP client:
@@ -98,7 +129,7 @@ To opt out of anonymous usage telemetry, add `"env": { "PREMIERE_MCP_TELEMETRY":
 Use source setup when developing the MCP, modifying the CEP panel, or troubleshooting a package install:
 
 ```bash
-git clone https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP.git
+git clone https://github.com/<your-fork>/Adobe_Premiere_Pro_MCP.git
 cd Adobe_Premiere_Pro_MCP
 npm install
 npm run build
@@ -174,13 +205,13 @@ High-level workflow tools included:
 If you want Codex, Claude Code, or another agent to handle installation, verification, and day-to-day usage correctly, install the included Agent Skill:
 
 ```bash
-npx skills add hetpatel-11/Adobe_Premiere_Pro_MCP --skill premiere-pro-mcp
+npx skills add <your-fork>/Adobe_Premiere_Pro_MCP --skill premiere-pro-mcp
 ```
 
 Or install directly from the skill path:
 
 ```bash
-npx skills add https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP/tree/main/skills/premiere-pro-mcp
+npx skills add https://github.com/<your-fork>/Adobe_Premiere_Pro_MCP/tree/main/skills/premiere-pro-mcp
 ```
 
 The skill teaches agents how to install the MCP, start and verify the CEP bridge, use the Premiere tools safely, import real media before editing, prefer sequence-aware operations, and run diagnostics when something fails.

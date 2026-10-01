@@ -14,10 +14,10 @@ import { PremiereProTools } from '../../tools/index.js';
 import { executeExpandedTool } from '../../tools/expanded.js';
 
 describe('QE targeting, second pass', () => {
-  const expandedScript = async (name: string): Promise<string> => {
+  const expandedScript = async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
     let script = '';
     const bridge = { executeScript: async (s: string) => { script = s; return { success: true }; } };
-    try { await executeExpandedTool(bridge as any, name, {}); } catch { /* arg guards are fine */ }
+    try { await executeExpandedTool(bridge as any, name, args); } catch { /* arg guards are fine */ }
     return script;
   };
 
@@ -98,7 +98,7 @@ describe('QE targeting, second pass', () => {
     });
 
     it('batch_apply_effect matches items by start time', async () => {
-      const script = await expandedScript('batch_apply_effect');
+      const script = await expandedScript('batch_apply_effect', { allClips: true });
 
       expect(script).toContain('__findQeClipByDomClip(qeBatchTrack,');
       expect(script).not.toContain('getItemAt(batchClips[bai].clipIndex)');

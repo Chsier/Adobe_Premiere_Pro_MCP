@@ -1228,6 +1228,12 @@ export class PremiereProBridge implements PremiereProTransport {
 
   private async waitForResponse(responseFile: string, timeout = 60000): Promise<any> {
     const startTime = Date.now();
+    // The CEP panel writes its heartbeat on the same thread that runs
+    // evalScript. A long render or batch therefore makes an otherwise healthy
+    // heartbeat go stale. Remember whether the panel was live at least once for
+    // this command: a heartbeat that was fresh and then disappeared means the
+    // panel is busy, while one that was never present still means it is absent.
+    let heartbeatEverFresh = false;
     // A response that exists but will not parse is a different failure from one that has
     // not arrived, and reporting it as the latter sends the reader to check whether
     // Premiere is running when the real problem is the payload. Allow a few attempts for a
@@ -1264,11 +1270,11 @@ export class PremiereProBridge implements PremiereProTransport {
       // we should wait out the real timeout (evalScript can be slow).
       if (Date.now() - startTime >= BRIDGE_PANEL_ABSENT_MS) {
         const beat = await this.readHeartbeat();
+        if (beat?.started) heartbeatEverFresh = true;
         if (!beat) {
-          throw new Error(BRIDGE_PANEL_NOT_RUNNING);
-        }
-        if (!beat.started) {
-          throw new Error(BRIDGE_NOT_STARTED);
+          if (!heartbeatEverFresh) throw new Error(BRIDGE_PANEL_NOT_RUNNING);
+        } else if (!beat.started) {
+          if (!heartbeatEverFresh) throw new Error(BRIDGE_NOT_STARTED);
         }
       }
 
@@ -1283,9 +1289,13 @@ export class PremiereProBridge implements PremiereProTransport {
       );
     }
 
+    const busySuffix = heartbeatEverFresh
+      ? ' The panel heartbeat was fresh when the command was published and then went stale, which is expected while Premiere is busy. Do not retry the same command unless the panel says Connected and the operation is still needed.'
+      : '';
     throw new Error(
       'Bridge response timeout. Ensure Premiere Pro is open, MCP Bridge (CEP or UXP) panel is open, ' +
-      'Temp Directory is set to ' + this.tempDir + ', and Start Bridge is clicked. Do not retry until the panel says Connected.'
+      'Temp Directory is set to ' + this.tempDir + ', and Start Bridge is clicked. Do not retry until the panel says Connected.' +
+      busySuffix
     );
   }
 
@@ -1921,25 +1931,25 @@ export class PremiereProBridge implements PremiereProTransport {
     const sourceRange = options.sourceRange ?? 'entire';
     const removeOnCompletion = options.removeOnCompletion ?? true;
     const encoder = await this.findInstalledMediaEncoder();
-    if (encoder.available === false) {
-      return {
-        success: false,
-        status: 'failed',
-        code: 'MEDIA_ENCODER_NOT_INSTALLED',
-        error: 'Adobe Media Encoder is not installed. The export was not sent to Premiere, so no native Media Encoder warning was shown.',
-        searchedPaths: encoder.searchedPaths,
-        outputPath,
-        presetPath,
-        sourceRange,
-      };
-    }
+    const mediaEncoderAvailable = encoder.available !== false;
+    // Premiere's scripted exporters expect native Windows separators. Forward
+    // slashes can make encodeSequence throw and exportAsMediaDirect return a
+    // bare error while writing nothing. Normalize once for both paths.
+    const normalizePremierePath = (value: string): string => {
+      const trimmed = value.trim();
+      if (process.platform !== 'win32') return trimmed;
+      return trimmed.replace(/\//g, '\\');
+    };
+    const premiereOutputPath = normalizePremierePath(outputPath);
+    const premierePresetPath = normalizePremierePath(presetPath);
     const script = `
       try {
         var sequenceId = ${JSON.stringify(sequenceId)};
-        var outputPath = ${JSON.stringify(outputPath)};
-        var presetPath = ${JSON.stringify(presetPath)};
+        var outputPath = ${JSON.stringify(premiereOutputPath)};
+        var presetPath = ${JSON.stringify(premierePresetPath)};
         var sourceRange = ${JSON.stringify(sourceRange)};
         var removeOnCompletion = ${removeOnCompletion ? 1 : 0};
+        var mediaEncoderAvailable = ${mediaEncoderAvailable ? 1 : 0};
         var warnings = [];
 
         function secondsOf(value) {
@@ -1965,6 +1975,7 @@ export class PremiereProBridge implements PremiereProTransport {
             sourceRange: sourceRange,
             outputPath: outputPath,
             presetPath: presetPath,
+            mediaEncoderAvailable: !!mediaEncoderAvailable,
             warnings: warnings
           };
           if (details) {
@@ -1983,14 +1994,20 @@ export class PremiereProBridge implements PremiereProTransport {
         if (!sequence) {
           return rangeFailure("SEQUENCE_NOT_FOUND", "Sequence not found by id: " + sequenceId);
         }
-        if (typeof app.encoder === "undefined") {
-          return rangeFailure("ENCODER_UNAVAILABLE", "app.encoder not available in this Premiere build");
+        if (!mediaEncoderAvailable) {
+          warnings.push({
+            code: "MEDIA_ENCODER_UNAVAILABLE",
+            message: "Adobe Media Encoder was not found; trying Premiere's direct exporter instead."
+          });
         }
 
-        // Boot AME if not already running so it can pick up the queue
-        try { app.encoder.launchEncoder(); }
-        catch (e1) {
-          warnings.push({ code: "LAUNCH_ENCODER_FAILED", message: e1.toString() });
+        var hasEncoderApi = typeof app.encoder !== "undefined";
+        var hasEncodeSequence = hasEncoderApi && typeof app.encoder.encodeSequence === "function";
+        if (hasEncoderApi && mediaEncoderAvailable) {
+          try { app.encoder.launchEncoder(); }
+          catch (e1) {
+            warnings.push({ code: "LAUNCH_ENCODER_FAILED", message: e1.toString() });
+          }
         }
 
         var sequenceEnd = secondsOf(sequence.end);
@@ -2051,65 +2068,155 @@ export class PremiereProBridge implements PremiereProTransport {
           return rangeFailure("INVALID_SOURCE_RANGE", "Unsupported sourceRange: " + sourceRange);
         }
 
-        if (typeof app.encoder[encoderRangeConstant] === "undefined") {
-          return rangeFailure("ENCODER_RANGE_UNAVAILABLE", "Requested encoder range constant is unavailable: " + encoderRangeConstant, {
-            encoderRangeConstant: encoderRangeConstant,
-            resolvedRange: resolvedRange
+        // exportAsMediaDirect uses the same range enum as app.encoder
+        // (0=entire, 1=in/out, 2=work area). Prefer the host constant when it
+        // exists, but keep numeric fallbacks so this path still works on builds
+        // where app.encoder is absent or partially wired.
+        var directWorkAreaType = 0;
+        if (sourceRange === "in_out") directWorkAreaType = 1;
+        else if (sourceRange === "work_area") directWorkAreaType = 2;
+        var encoderRange = directWorkAreaType;
+        if (hasEncoderApi && typeof app.encoder[encoderRangeConstant] !== "undefined") {
+          encoderRange = app.encoder[encoderRangeConstant];
+        }
+        range = encoderRange;
+
+        var jobID = null;
+        var method = null;
+        var queueStarted = false;
+        var directResult = null;
+        var outputExists = false;
+        var directAttempted = false;
+
+        if (hasEncodeSequence && mediaEncoderAvailable) {
+          try {
+            jobID = app.encoder.encodeSequence(
+              sequence,
+              outputPath,
+              presetPath,
+              range,
+              removeOnCompletion
+            );
+          } catch (encodeError) {
+            warnings.push({ code: "ENCODE_SEQUENCE_FAILED", message: encodeError.toString() });
+          }
+          if (!jobID) {
+            warnings.push({
+              code: "ENCODE_SEQUENCE_NO_JOB",
+              message: "encodeSequence returned no jobID; falling back to exportAsMediaDirect."
+            });
+          }
+        } else {
+          warnings.push({
+            code: "ENCODE_SEQUENCE_SKIPPED",
+            message: "encodeSequence is unavailable or AME was not found; using exportAsMediaDirect."
           });
         }
-        range = app.encoder[encoderRangeConstant];
 
-        var jobID = app.encoder.encodeSequence(
-          sequence,
-          outputPath,
-          presetPath,
-          range,
-          removeOnCompletion
-        );
+        if (jobID) {
+          method = "encodeSequence";
+          // Trigger AME to actually start processing the queued job
+          try {
+            var startBatchResult = app.encoder.startBatch();
+            queueStarted = startBatchResult !== false;
+          } catch (e2) {
+            warnings.push({ code: "START_BATCH_FAILED", message: e2.toString() });
+          }
 
-        if (!jobID) {
           return JSON.stringify({
-            success: false,
-            status: "failed",
-            error: "encodeSequence returned no jobID — preset path may be invalid or AME not connected",
+            success: true,
+            status: "queued",
+            queued: true,
+            queueStarted: queueStarted,
+            jobID: String(jobID),
+            method: method,
             outputPath: outputPath,
             presetPath: presetPath,
             sourceRange: sourceRange,
             resolvedRange: resolvedRange,
             encoderRangeConstant: encoderRangeConstant,
+            directWorkAreaType: directWorkAreaType,
+            removeOnCompletion: !!removeOnCompletion,
+            mediaEncoderAvailable: !!mediaEncoderAvailable,
             warnings: warnings
           });
         }
 
-        // Trigger AME to actually start processing the queued job
-        var queueStarted = false;
+        if (typeof sequence.exportAsMediaDirect !== "function") {
+          return rangeFailure("DIRECT_EXPORT_UNAVAILABLE", "Both encodeSequence and sequence.exportAsMediaDirect are unavailable.", {
+            encoderRangeConstant: encoderRangeConstant,
+            directWorkAreaType: directWorkAreaType
+          });
+        }
+
+        directAttempted = true;
         try {
-          var startBatchResult = app.encoder.startBatch();
-          queueStarted = startBatchResult !== false;
-        } catch (e2) {
-          warnings.push({ code: "START_BATCH_FAILED", message: e2.toString() });
+          directResult = sequence.exportAsMediaDirect(outputPath, presetPath, directWorkAreaType);
+        } catch (directError) {
+          return rangeFailure("DIRECT_EXPORT_THREW", "exportAsMediaDirect threw: " + directError.toString(), {
+            encoderRangeConstant: encoderRangeConstant,
+            directWorkAreaType: directWorkAreaType
+          });
+        }
+
+        var directText = String(directResult);
+        if (directText !== "No Error") {
+          return JSON.stringify({
+            success: false,
+            status: "failed",
+            code: "DIRECT_EXPORT_FAILED",
+            error: "exportAsMediaDirect returned: " + directText,
+            outputPath: outputPath,
+            presetPath: presetPath,
+            sourceRange: sourceRange,
+            resolvedRange: resolvedRange,
+            encoderRangeConstant: encoderRangeConstant,
+            directWorkAreaType: directWorkAreaType,
+            directAttempted: directAttempted,
+            directResult: directText,
+            mediaEncoderAvailable: !!mediaEncoderAvailable,
+            warnings: warnings
+          });
+        }
+
+        try {
+          outputExists = new File(outputPath).exists;
+        } catch (existsError) {
+          warnings.push({ code: "OUTPUT_EXISTS_CHECK_FAILED", message: existsError.toString() });
+        }
+        if (!outputExists) {
+          warnings.push({
+            code: "OUTPUT_PATH_NOT_A_FILE",
+            message: "exportAsMediaDirect returned No Error but the requested path is not a file. Some presets write a folder bundle (for example P2 MXF); inspect the output directory and probe the actual media file."
+          });
         }
 
         return JSON.stringify({
           success: true,
-          status: "queued",
-          queued: true,
-          queueStarted: queueStarted,
-          jobID: String(jobID),
+          status: "rendered",
+          rendered: true,
+          method: "exportAsMediaDirect",
+          directAttempted: directAttempted,
+          directResult: directText,
+          outputExists: outputExists,
           outputPath: outputPath,
           presetPath: presetPath,
           sourceRange: sourceRange,
           resolvedRange: resolvedRange,
           encoderRangeConstant: encoderRangeConstant,
-          removeOnCompletion: !!removeOnCompletion,
+          directWorkAreaType: directWorkAreaType,
+          mediaEncoderAvailable: !!mediaEncoderAvailable,
           warnings: warnings
         });
       } catch (e) {
-        return JSON.stringify({ success: false, error: "encodeSequence threw: " + e.toString() });
+        return JSON.stringify({ success: false, error: "renderSequence failed: " + e.toString() });
       }
     `;
 
-    const raw = await this.executeScript(script);
+    // Direct export is synchronous and blocks the CEP panel for the duration of
+    // the render. Give the bridge enough time to return the real result instead
+    // of treating a long render as a dead panel.
+    const raw = await this.executeScript(script, 15 * 60 * 1000);
     // CEP returns the JSON.stringify'd object; bridge.executeScript returns parsed.result if present.
     // Some CEP plugins wrap as string; handle both.
     if (typeof raw === "string") {
@@ -2122,37 +2229,293 @@ export class PremiereProBridge implements PremiereProTransport {
    * Avoid calling app.encoder.launchEncoder() when AME is absent: Premiere shows
    * a blocking native warning in that case. An unreadable install directory is
    * treated as unknown, so a transient filesystem error does not disable export.
+   *
+   * Adobe apps are frequently installed outside `%ProgramFiles%`. A hard-coded
+   * scan of the Program Files roots therefore produced false "Media Encoder is
+   * not installed" answers. Candidates are now collected from, in order:
+   * explicit env overrides, the registry, conventional Adobe directories
+   * (including adjacent to the running Premiere install), and finally the
+   * Program Files roots.
    */
   private async findInstalledMediaEncoder(): Promise<{ available: boolean; searchedPaths: string[] }> {
     if (process.platform === 'darwin') {
       const applications = '/Applications';
+      const appPattern = /^Adobe Media Encoder(?: \d+)?\.app$/i;
+      const folderPattern = /^Adobe Media Encoder(?: \d+)?$/i;
       try {
         const entries = await fs.readdir(applications);
-        const found = entries.some((entry) => /^Adobe Media Encoder(?: \d+)?\.app$/i.test(entry));
-        return { available: found, searchedPaths: [applications] };
+        if (entries.some((entry) => appPattern.test(entry))) {
+          return { available: true, searchedPaths: [applications] };
+        }
+
+        const inconclusive: string[] = [];
+        for (const entry of entries) {
+          if (!folderPattern.test(entry)) continue;
+          const nested = joinPremiereHostPath(applications, entry);
+          try {
+            const nestedEntries = await fs.readdir(nested);
+            if (nestedEntries.some((file) => appPattern.test(file))) {
+              return { available: true, searchedPaths: [applications, nested] };
+            }
+          } catch {
+            // Creative Cloud normally uses this nested layout. If the folder
+            // exists but cannot be read, treating AME as absent would be a false
+            // negative; fall through to the fail-open branch below.
+            inconclusive.push(nested);
+          }
+        }
+        if (inconclusive.length > 0) {
+          return { available: true, searchedPaths: [applications, ...inconclusive] };
+        }
+        return { available: false, searchedPaths: [applications] };
       } catch {
         return { available: true, searchedPaths: [applications] };
       }
     }
 
     if (process.platform === 'win32') {
-      const roots = [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter((value): value is string => Boolean(value));
-      const searchedPaths = roots.map((root) => join(root, 'Adobe'));
+      const discovery = await this.collectMediaEncoderSearchPaths();
+      const searchedPaths = discovery.paths;
       if (searchedPaths.length === 0) return { available: true, searchedPaths };
-      try {
-        for (const directory of searchedPaths) {
-          const entries = await fs.readdir(directory);
-          if (entries.some((entry) => /^Adobe Media Encoder(?: \d+)?$/i.test(entry))) {
-            return { available: true, searchedPaths };
-          }
-        }
-        return { available: false, searchedPaths };
-      } catch {
-        return { available: true, searchedPaths };
+      const inconclusive: string[] = [];
+      for (const directory of searchedPaths) {
+        const probe = await this.probeMediaEncoderDirectory(directory);
+        if (probe === 'installed') return { available: true, searchedPaths };
+        if (probe === 'unreadable') inconclusive.push(directory);
       }
+      // Only an *existing* path we could not read is genuinely unknown. A candidate
+      // that does not exist (for example a guessed drive letter) is a definite miss,
+      // otherwise every machine without AME would silently look "unknown".
+      const unknown = await this.somePathExists(inconclusive);
+      return { available: unknown, searchedPaths };
     }
 
     return { available: true, searchedPaths: [] };
+  }
+
+  /**
+   * Explicit configuration, in priority order: process environment, then the local
+   * Codex config. The config fallback exists because the desktop app does not always
+   * pass `[mcp_servers.*.env]` through to the spawned server, and a silent miss there
+   * is exactly what made AME look absent in the first place.
+   */
+  private async localConfigValues(): Promise<Map<string, string>> {
+    const values = new Map<string, string>();
+    const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+    if (!home) return values;
+
+    const configPath = pathWin32.join(home, '.codex', 'config.toml');
+    let content = '';
+    try {
+      content = await fs.readFile(configPath, 'utf8');
+    } catch {
+      return values;
+    }
+
+    for (const line of content.split(/\r?\n/)) {
+      const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$/.exec(line);
+      if (!match) continue;
+      const [, key, rawValue] = match;
+      if (!key || !rawValue) continue;
+      const unquoted = rawValue.replace(/^['"]|['"]$/g, '').trim();
+      if (unquoted) values.set(key, unquoted);
+    }
+    return values;
+  }
+
+  /** Environment + local config overrides, in priority order. */
+  private async mediaEncoderEnvCandidates(): Promise<{ amePaths: string[]; adobeRoots: string[] }> {
+    const amePaths: string[] = [];
+    const adobeRoots: string[] = [];
+    const normalise = (value: string | undefined) => {
+      if (!value) return '';
+      return value.trim().replace(/^["']|["']$/g, '').replace(/\//g, '\\').replace(/\\+$/, '');
+    };
+
+    const config = await this.localConfigValues();
+    const pick = (envKeys: string[], configKeys: string[]) => {
+      const found: string[] = [];
+      for (const key of envKeys) {
+        const value = normalise(process.env[key]);
+        if (value) found.push(value);
+      }
+      for (const key of configKeys) {
+        const value = normalise(config.get(key));
+        if (value) found.push(value);
+      }
+      return found;
+    };
+
+    for (const value of pick(
+      ['PREMIERE_AME_PATH', 'ADOBE_AME_PATH'],
+      ['PREMIERE_AME_PATH', 'ADOBE_AME_PATH']
+    )) {
+      if (!amePaths.includes(value)) amePaths.push(value);
+    }
+    for (const value of pick(
+      ['PREMIERE_ADOBE_ROOT', 'ADOBE_ROOT', 'ADOBE_HOME'],
+      ['PREMIERE_ADOBE_ROOT', 'ADOBE_ROOT', 'ADOBE_HOME']
+    )) {
+      if (!adobeRoots.includes(value)) adobeRoots.push(value);
+    }
+    return { amePaths, adobeRoots };
+  }
+
+  /**
+   * All directories worth probing, regardless of drive. Explicit configuration wins,
+   * then the uninstall registry, then conventional Adobe roots next to Premiere
+   * itself, and finally the Program Files defaults.
+   */
+  private async collectMediaEncoderSearchPaths(): Promise<{
+    paths: string[];
+  }> {
+    const candidates: string[] = [];
+    const push = (value: string) => {
+      if (!value) return;
+      const normalised = value.replace(/\//g, '\\').replace(/\\+$/, '');
+      if (normalised && !candidates.includes(normalised)) candidates.push(normalised);
+    };
+    const expandInto = async (root: string) => {
+      const expanded = await this.expandAdobeRootForMediaEncoder(root);
+      for (const entry of expanded.paths) push(entry);
+    };
+
+    const { amePaths, adobeRoots } = await this.mediaEncoderEnvCandidates();
+    for (const amePath of amePaths) push(amePath);
+    for (const root of adobeRoots) {
+      push(root);
+      await expandInto(root);
+    }
+
+    for (const installLocation of await this.queryRegistryMediaEncoderInstallLocations()) {
+      push(installLocation);
+    }
+
+    const conventionalRoots = new Set<string>();
+    for (const drive of ['C', 'D', 'E', 'F', 'G', 'H']) {
+      conventionalRoots.add(`${drive}:\\Support\\Adobe`);
+      conventionalRoots.add(`${drive}:\\Adobe`);
+    }
+    for (const root of [process.env.ProgramFiles, process.env['ProgramFiles(x86)']]) {
+      if (root) conventionalRoots.add(pathWin32.join(root, 'Adobe'));
+    }
+    const premiereRoot = (process.env.PREMIERE_INSTALL_ROOT ?? '').replace(/\//g, '\\').replace(/\\+$/, '');
+    if (premiereRoot) {
+      const parent = pathWin32.dirname(premiereRoot);
+      conventionalRoots.add(parent);
+      conventionalRoots.add(pathWin32.dirname(parent));
+    }
+
+    for (const root of conventionalRoots) {
+      push(root);
+      await expandInto(root);
+    }
+
+    return { paths: candidates };
+  }
+
+  /** Expand an Adobe install root into its `Adobe Media Encoder *` subfolders. */
+  private async expandAdobeRootForMediaEncoder(
+    root: string
+  ): Promise<{ paths: string[] }> {
+    let entries: string[] | null = null;
+    try {
+      entries = await fs.readdir(root);
+    } catch {
+      return { paths: [] };
+    }
+    if (!entries) return { paths: [] };
+    return {
+      paths: entries
+        .filter((entry) => /^Adobe Media Encoder(?: \d+(?:\.\d+)*)?$/i.test(entry))
+        .map((entry) => pathWin32.join(root, entry)),
+    };
+  }
+
+  /**
+   * Distinguish "the AME executable is here" from "readable but empty" and
+   * "unreadable". Only a real executable counts as installed, and only an
+   * unreadable path counts as unknown.
+   */
+  private async probeMediaEncoderDirectory(
+    directory: string
+  ): Promise<'installed' | 'absent' | 'unreadable'> {
+    const executablePattern = /^Adobe Media Encoder(?: \d+(?:\.\d+)*)?\.exe$/i;
+
+    if (executablePattern.test(pathWin32.basename(directory))) return 'installed';
+
+    let entries: string[] | null = null;
+    try {
+      entries = await fs.readdir(directory);
+    } catch {
+      return 'unreadable';
+    }
+    if (!entries) return 'unreadable';
+    if (entries.some((entry) => executablePattern.test(entry))) return 'installed';
+
+    for (const entry of entries) {
+      if (!/^Adobe Media Encoder(?: \d+)?$/i.test(entry)) continue;
+      let nested: string[] | null = null;
+      try {
+        nested = await fs.readdir(pathWin32.join(directory, entry));
+      } catch {
+        nested = null;
+      }
+      if (nested?.some((file) => executablePattern.test(file))) return 'installed';
+    }
+
+    return 'absent';
+  }
+
+  /** True when at least one candidate exists on disk, even if it could not be listed. */
+  private async somePathExists(paths: string[]): Promise<boolean> {
+    if (paths.length === 0) return false;
+    const checks = await Promise.all(
+      paths.map(async (candidate) => {
+        try {
+          await fs.access(candidate);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+    );
+    return checks.some(Boolean);
+  }
+
+  /**
+   * Adobe records its install location in the uninstall registry, which stays
+   * correct no matter which drive the user picked.
+   */
+  private async queryRegistryMediaEncoderInstallLocations(): Promise<string[]> {
+    const results = new Set<string>();
+    const queryScript = [
+      "$paths = @('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',",
+      "'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',",
+      "'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall');",
+      'foreach ($p in $paths) {',
+      '  Get-ChildItem $p -ErrorAction SilentlyContinue | ForEach-Object {',
+      '    $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue;',
+      '    if ($props.DisplayName -match "Media Encoder" -and $props.InstallLocation) { Write-Output $props.InstallLocation }',
+      '  }',
+      '}',
+    ].join(' ');
+
+    try {
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', queryScript],
+        { timeout: 10000, windowsHide: true }
+      );
+      for (const line of stdout.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) results.add(trimmed);
+      }
+    } catch {
+      // Registry probing is best effort; fall through to the filesystem candidates.
+    }
+
+    return [...results].filter((value) => value.length > 0);
   }
 
   async listProjectItems(): Promise<PremiereProProjectItem[]> {

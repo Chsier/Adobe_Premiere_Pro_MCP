@@ -18,6 +18,40 @@ Use this skill when working with the Adobe Premiere Pro MCP server from `hetpate
 - For generated/demo edits, prefer creating a new clearly named sequence instead of modifying the user's active sequence.
 - If a tool returns `success: false`, report the exact error and run diagnostics before retrying blindly.
 
+## Fork Hardening
+
+This fork keeps upstream compatibility and adds the following verified safety
+rules. Apply them before editing or diagnosing a live project.
+
+- `remove_from_timeline` defaults to `lift` and leaves a gap. Pass
+  `deleteMode: "ripple"` only when downstream clips should move.
+- `batch_apply_effect` requires a non-empty `clips` array, applies only to those
+  clips, and fails the whole call before mutation when an id is unknown.
+- `add_adjustment_layer` fails closed in this build. Create a real Adjustment
+  Layer in Premiere and place it with the timeline tools instead of relying on a
+  generated transparent PNG.
+- Prefer `export_sequence`: it tries the Media Encoder queue when available and
+  falls back to Premiere's `exportAsMediaDirect()`. On Windows, paths must use
+  native backslashes. The preset, not the requested filename, determines the
+  actual container, so inspect `method`, `directResult`, `outputExists`, and the
+  output directory after export.
+- Media Encoder discovery is configurable. Use `PREMIERE_AME_PATH` or
+  `ADOBE_AME_PATH` for an explicit executable/folder, and
+  `PREMIERE_ADOBE_ROOT`, `ADOBE_ROOT`, or `ADOBE_HOME` for an Adobe install root
+  that is outside the default Program Files locations.
+- A long bridge command can make the panel heartbeat go stale after it was
+  initially fresh. Treat that as busy, not as proof that the panel exited. Do not
+  retry a render, batch, or destructive command until the panel reports
+  `Connected` and the operation is still needed.
+- `verify_premiere_connection.readOnly` is `null` with
+  `readOnlySource: "unavailable"`. It is not a lock indicator; use
+  `save_project_as` when saving is blocked.
+- `execute_extendscript` wraps the body in an IIFE, so the script must `return`
+  explicitly. Prefer a plain string result.
+- Never commit bridge responses, project names, media paths, credentials,
+  certificates, or machine-specific configuration. Keep bridge runtime state in
+  an ignored local directory.
+
 ## Install Workflow
 
 If the user asks you to install or set up the MCP:

@@ -204,5 +204,22 @@ describe('bridge file-queue protocol', () => {
       await expect(bridge.executeScript('return 1;', 700)).rejects.toThrow(/timeout/i);
       expect(Date.now() - started).toBeGreaterThanOrEqual(700);
     });
+
+    it('does not turn a heartbeat that goes stale during a long command into a dead bridge', async () => {
+      let heartbeatReads = 0;
+      mockFs.readFile.mockImplementation(async (file) => {
+        if (String(file) === heartbeatPath) {
+          heartbeatReads++;
+          if (heartbeatReads === 1) {
+            return JSON.stringify({ t: Date.now(), started: true });
+          }
+        }
+        throw new Error('ENOENT');
+      });
+      const bridge = await readyBridge();
+
+      await expect(bridge.executeScript('return 1;', 2400)).rejects.toThrow(/busy|timeout/i);
+      expect(heartbeatReads).toBeGreaterThan(1);
+    });
   });
 });

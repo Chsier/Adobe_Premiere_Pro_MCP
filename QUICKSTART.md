@@ -2,10 +2,13 @@
 
 This is the shortest path to a working install.
 
+Replace `<your-fork>` with the owner of the fork you cloned. The rest of the
+steps use placeholders and contain no machine-specific paths.
+
 ## Claude Desktop (macOS)
 
 ```bash
-git clone https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP.git
+git clone https://github.com/<your-fork>/Adobe_Premiere_Pro_MCP.git
 cd Adobe_Premiere_Pro_MCP
 npm run setup:mac
 ```
@@ -36,7 +39,7 @@ For better editing behavior, attach `premiere://config/get_instructions` before 
 ## GitHub Copilot / Claude Desktop (Windows)
 
 ```powershell
-git clone https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP.git
+git clone https://github.com/<your-fork>/Adobe_Premiere_Pro_MCP.git
 cd Adobe_Premiere_Pro_MCP
 npm run setup:win
 ```

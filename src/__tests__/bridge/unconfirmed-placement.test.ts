@@ -242,7 +242,26 @@ describe('bins are resolved by walking, not by string key', () => {
     // survives emission, so a not.toContain on it can never fail -- the same
     // source-versus-emitted confusion this change exists to fix.
     expect(script).not.toContain('children["Footage"]');
-    expect(script).toContain('__binByName(app.project.rootItem, "Footage")');
+    if (tool === 'create_bin') {
+      expect(script).toContain('__binByName(app.project.rootItem, "Footage")');
+    } else {
+      expect(script).toContain('__binByPath(app.project.rootItem, "Footage")');
+    }
+  });
+
+  it('import_folder uses app.project.importFiles and allows long imports', async () => {
+    await tools.executeTool('import_folder', {
+      folderPath: '/tmp/footage',
+      binName: 'Footage',
+      recursive: true,
+      excludeFolders: ['_originals'],
+    });
+
+    const script = bridge.executeScript.mock.calls[0][0] as string;
+    expect(script).toContain('app.project.importFiles(filesToImport, true, targetBin, false)');
+    expect(script).not.toContain('targetBin.importFiles');
+    expect(script).toContain('var excludedFolders = ["_originals"];');
+    expect(bridge.executeScript.mock.calls[0][1]).toBe(900000);
   });
 });
 

@@ -4,6 +4,25 @@ All notable changes are documented here. Releases use semantic versioning.
 
 ## [Unreleased]
 
+- Added a direct Premiere export fallback when Adobe Media Encoder is absent or
+  `encodeSequence` returns no job id. Windows paths are normalized to native
+  backslashes, and results report `method`, `directResult`, `outputExists`, and
+  `mediaEncoderAvailable` so callers can verify the actual output container.
+- Media Encoder discovery no longer assumes `%ProgramFiles%`. It supports
+  explicit environment/config roots, the Windows uninstall registry, conventional
+  Adobe roots on other drives, and an unreadable-path fallback that does not
+  block export.
+- `remove_from_timeline` now defaults to `lift`, leaving a gap. Callers must pass
+  `deleteMode: "ripple"` explicitly when downstream clips should move.
+- Long bridge commands no longer turn a heartbeat that was fresh when the command
+  was published into a false "panel absent" error when it later goes stale.
+- `batch_apply_effect` requires a non-empty `clips` list, applies only to those
+  clips, and rejects unknown ids before making any change.
+- `add_adjustment_layer` now fails closed instead of placing a transparent PNG
+  that does not pass effects through.
+- `verify_premiere_connection.readOnly` is reported as `null` with
+  `readOnlySource: "unavailable"` instead of a hard-coded value.
+
 ## [1.2.8] - 2026-09-02
 
 - `move_clip_to_track` parks past the last clip on the destination, restores

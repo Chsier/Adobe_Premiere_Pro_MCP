@@ -12,8 +12,10 @@
  * writes to the command file is held to the same contract as a tool's script: it
  * must parse as ES3 and must not run a payload.
  *
- * Methods are enumerated from the prototype rather than listed, so a new one is
- * covered without anyone remembering to add it here.
+ * The class is checked against two explicit inventories. A new prototype method
+ * makes this test fail until its author classifies it as either a script builder
+ * or a non-script helper, so an unclassified method cannot silently escape the
+ * sweep.
  */
 
 import vm from 'vm';
@@ -35,11 +37,26 @@ const BREAKOUT_SINGLE = "zz'; __OWNED = true; var __x = '";
 const BREAKOUT_BACKSLASH = 'zz\\"); __OWNED = true; ("';
 const PAYLOADS = [BREAKOUT_DOUBLE, BREAKOUT_SINGLE, BREAKOUT_BACKSLASH];
 
-/** Lifecycle and transport; driving these tests the harness, not a script. */
-const NOT_SCRIPT_BUILDERS = new Set([
-  'constructor', 'initialize', 'cleanup', 'executeScript', 'waitForResponse',
-  'detectPremiereProInstallation', 'initializeCommunication', 'isConnected',
-  'getTempDir', 'runDiagnostics',
+/** Bridge methods that build and execute an ExtendScript payload. */
+const SCRIPT_BUILDERS = [
+  'createProject', 'openProject', 'saveProject', 'importMedia', 'createSequence',
+  'addToTimeline', 'addToTimelineBatch', 'renderSequence', 'listProjectItems',
+] as const;
+
+/**
+ * Everything else on the prototype: lifecycle, filesystem, host detection,
+ * transport, and local diagnostics. Keep this list exhaustive; the inventory
+ * assertion below turns an unclassified new method into a deliberate choice.
+ */
+const NON_SCRIPT_METHODS = new Set([
+  'constructor', 'initialize', 'setupTempDirectory', 'detectPremiereProInstallation',
+  'findPremiereLaunchPath', 'ensureHost', 'isPremiereProcessRunning', 'launchPremiere',
+  'waitForStartedHeartbeat', 'initializeCommunication', 'isSelfInvokingScript',
+  'buildExecutableScript', 'executeScript', 'readHeartbeat', 'waitForResponse',
+  'findInstalledMediaEncoder', 'localConfigValues', 'mediaEncoderEnvCandidates',
+  'collectMediaEncoderSearchPaths', 'expandAdobeRootForMediaEncoder',
+  'probeMediaEncoderDirectory', 'somePathExists', 'queryRegistryMediaEncoderInstallLocations',
+  'cleanup',
 ]);
 
 function payloadRuns(script: string): boolean {
@@ -93,26 +110,38 @@ describe('scripts the bridge builds itself', () => {
       .filter((payload): payload is string => typeof payload === 'string' && payload.includes('"script"'))
       .map((payload) => JSON.parse(payload).script as string);
 
-  const scriptBuilders = (bridge: PremiereProBridge): string[] =>
-    Object.getOwnPropertyNames(Object.getPrototypeOf(bridge))
-      .filter((name) => !NOT_SCRIPT_BUILDERS.has(name))
-      .filter((name) => typeof (bridge as unknown as Record<string, unknown>)[name] === 'function');
+  const prototypeMethods = (): string[] =>
+    Object.getOwnPropertyNames(PremiereProBridge.prototype)
+      .filter((name) => typeof (PremiereProBridge.prototype as unknown as Record<string, unknown>)[name] === 'function');
 
   it('cannot be broken out of through any method that builds one', async () => {
-    const probe = await readyBridge();
-    const methods = scriptBuilders(probe);
+    const unclassified = prototypeMethods().filter(
+      (name) => !SCRIPT_BUILDERS.includes(name as (typeof SCRIPT_BUILDERS)[number]) && !NON_SCRIPT_METHODS.has(name),
+    );
+    expect(unclassified).toEqual([]);
+
+    const bridge = await readyBridge();
+    const missingBuilders = SCRIPT_BUILDERS.filter(
+      (name) => typeof (bridge as unknown as Record<string, unknown>)[name] !== 'function',
+    );
+    expect(missingBuilders).toEqual([]);
+
+    // AME discovery shells out to the registry on Windows. It is not part of the
+    // injection contract, so keep the sweep local and deterministic.
+    const discoverySpy = jest
+      .spyOn(bridge as unknown as { findInstalledMediaEncoder: () => Promise<{ available: boolean; searchedPaths: string[] }> }, 'findInstalledMediaEncoder')
+      .mockResolvedValue({ available: false, searchedPaths: [] });
 
     const escaped: string[] = [];
     const unparseable: string[] = [];
     let checked = 0;
 
-    for (const method of methods) {
+    for (const method of SCRIPT_BUILDERS) {
       for (const payload of PAYLOADS) {
         // Arity is unknown and varies; the payload is passed in every position a
         // method might read a string from.
         for (const arity of [1, 2, 3, 4]) {
           jest.clearAllMocks();
-          const bridge = await readyBridge();
           const call = (bridge as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[method];
           try {
             await call.apply(bridge, Array.from({ length: arity }, () => payload));
@@ -135,8 +164,10 @@ describe('scripts the bridge builds itself', () => {
       }
     }
 
+    discoverySpy.mockRestore();
+
     // A floor, so a harness that stopped driving anything cannot pass silently.
-    expect(methods.length).toBeGreaterThan(10);
+    expect(SCRIPT_BUILDERS.length).toBeGreaterThan(5);
     expect(checked).toBeGreaterThan(20);
 
     // Execution is the contract: no caller value may run as code.

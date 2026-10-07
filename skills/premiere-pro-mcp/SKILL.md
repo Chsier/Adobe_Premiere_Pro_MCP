@@ -36,15 +36,23 @@ rules. Apply them before editing or diagnosing a live project.
 - `add_adjustment_layer` fails closed in this build. Create a real Adjustment
   Layer in Premiere and place it with the timeline tools instead of relying on a
   generated transparent PNG.
-- Prefer `export_sequence`: it tries the Media Encoder queue when available and
-  falls back to Premiere's `exportAsMediaDirect()`. On Windows, paths must use
-  native backslashes. The preset, not the requested filename, determines the
-  actual container, so inspect `method`, `directResult`, `outputExists`, and the
-  output directory after export.
+- Prefer `export_sequence`: AME is the default route when available, with
+  `exportAsMediaDirect()` only as a fallback. On Windows, paths must use native
+  backslashes. Pass `format` when the delivery format matters; when no preset is
+  supplied it selects a matching installed AME system preset, and when a preset
+  is supplied it rejects a preset/format conflict instead of silently writing a
+  different container. If `format` is omitted, use the output extension when
+  recognised, otherwise default to MP4/H.264. Inspect `method`,
+  `directResult`, `outputExists`, the selected `presetResolution`, and the
+  actual artifact after export.
 - `export_sequence` / `add_to_render_queue` can submit several AME jobs in
   parallel, but AME encodes queued jobs sequentially by default. The job IDs
   returned by `encodeSequence` are submission receipts, not completion
   receipts. Wait for the artifact and probe the actual file.
+- `get_encoder_presets` includes installed AME `systempresets` as well as user
+  presets and reports `source`, `container`, `exporterFileType`, and
+  `formatTags`. Preset names can repeat across containers (`H264` MP4 and
+  QuickTime `MooV`), so pass `format` or an exact path to disambiguate.
 - On Premiere 25.4, `app.project.save()` can return success while opening a
   modal that says the project directory is not writable. The local build saves
   with `saveAs(currentPath)` and verifies the file on disk. If an older build is

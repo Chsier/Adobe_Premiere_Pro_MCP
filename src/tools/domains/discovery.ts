@@ -73,9 +73,9 @@ export const discoveryTools: ToolModule[] = [
   },
   {
     name: 'get_encoder_presets',
-    description: 'Discovers readable user Adobe Media Encoder .epr presets from local AME preset folders. Factory preset enumeration is not claimed complete.',
+    description: 'Discovers readable Adobe Media Encoder .epr presets from local user folders and installed AME systempresets directories. Each entry reports its source, container, and exporter file type so callers can select a matching format.',
     inputSchema: z.object({
-      directories: z.array(z.string()).optional().describe('Optional absolute directories to scan instead of the default user AME preset folders. Intended for tests and advanced setups.')
+      directories: z.array(z.string()).optional().describe('Optional absolute directories to scan instead of the default user and installed system AME preset folders. Intended for tests and advanced setups.')
     }),
     run: (_ctx, args) => getEncoderPresets(args.directories),
   },
@@ -133,21 +133,29 @@ export const discoveryTools: ToolModule[] = [
 
 const HEALTH_CHECK_TIMEOUT_MS = 8000;
 
+export type EncoderPresetSource = 'user' | 'system';
+
 export interface EncoderPresetEntry {
   name: string;
   path: string;
-  source: 'user';
+  source: EncoderPresetSource;
   ameVersion: string;
+  exporterFileType?: string;
+  container?: string;
+  formatTags?: string[];
 }
 
 interface EncoderPresetDiscovery {
   success: true;
   presets: EncoderPresetEntry[];
   count: number;
+  userCount: number;
+  systemCount: number;
   searchedDirectories: string[];
   errors: Array<{ path: string; error: string }>;
+  formats: string[];
   factoryPresets: {
-    supported: false;
+    supported: boolean;
     note: string;
   };
 }
@@ -717,6 +725,41 @@ async function validateProjectForExport(ctx: ToolContext, sequenceId?: string, o
   return await ctx.bridge.executeScript(script);
 }
 
+const FOURCC_CONTAINER_MAP: Record<string, string> = {
+  h264: 'mp4',
+  hevc: 'mp4',
+  mp4: 'mp4',
+  h26b: 'm2ts',
+  moov: 'mov',
+  aviv: 'avi',
+  mxf: 'mxf',
+  dmxf: 'mxf',
+  pmxf: 'mxf',
+  mx10: 'mxf',
+  mx11: 'mxf',
+  jmxf: 'mxf',
+  dcp_: 'dcp',
+  wave: 'wav',
+  aiff: 'aiff',
+  mp3: 'mp3',
+  aac: 'aac',
+  pcm: 'pcm',
+  png: 'png',
+  tiff: 'tiff',
+  tpic: 'tga',
+  jpeg: 'jpg',
+  dibb: 'bmp',
+  giff: 'gif',
+  oexr: 'exr',
+  dpx: 'dpx',
+  flv: 'flv',
+  wmv: 'wmv',
+  mpg2: 'mpeg2',
+  mbd: 'mpeg2',
+  hbd: 'mpeg2',
+  dvd: 'mpeg2',
+};
+
 function decodeXmlEntities(value: string): string {
   return value
     .replace(/&quot;/g, '"')
@@ -737,12 +780,208 @@ function displayNameFromPresetXml(xml: string): string | undefined {
   for (const pattern of patterns) {
     const match = pattern.exec(xml);
     const name = match?.[1] ? decodeXmlEntities(match[1]) : '';
-    if (name) return name;
+    if (name) {
+      const ameName = /\bPresetName=([\s\S]*?)\)\s*$/i.exec(name);
+      return ameName?.[1]?.trim() || name;
+    }
   }
   return undefined;
 }
 
-async function defaultEncoderPresetDirectories(): Promise<string[]> {
+function numberToFourCc(value: number): string | undefined {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) return undefined;
+  return String.fromCharCode(
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  );
+}
+
+function normaliseFourCc(value: string): string {
+  return value.replace(/\0/g, '').trimEnd();
+}
+
+function exporterFileTypeFromXml(xml: string): string | undefined {
+  const match = /<ExporterFileType[^>]*>\s*([^<]+?)\s*<\/ExporterFileType>/i.exec(xml);
+  if (!match?.[1]) return undefined;
+  const raw = match[1].trim();
+  if (/^0x[0-9a-f]{8}$/i.test(raw)) {
+    return normaliseFourCc(String.fromCharCode(
+      ...raw.slice(2).match(/.{2}/g)!.map((byte) => Number.parseInt(byte, 16)),
+    ));
+  }
+  if (/^\d+$/.test(raw)) {
+    const decoded = numberToFourCc(Number(raw));
+    return decoded ? normaliseFourCc(decoded) : undefined;
+  }
+  return normaliseFourCc(raw) || undefined;
+}
+
+function exporterFileTypeFromDirectory(presetPath: string): string | undefined {
+  const directoryName = basename(dirname(presetPath));
+  const match = /_([0-9a-f]{8})$/i.exec(directoryName);
+  if (!match?.[1]) return undefined;
+  return normaliseFourCc(String.fromCharCode(
+    ...match[1].match(/.{2}/g)!.map((byte) => Number.parseInt(byte, 16)),
+  ));
+}
+
+function containerFromExporterFileType(exporterFileType?: string): string | undefined {
+  if (!exporterFileType) return undefined;
+  return FOURCC_CONTAINER_MAP[normaliseFourCc(exporterFileType).toLowerCase()];
+}
+
+function inferPresetFormatTags(
+  presetName: string,
+  presetPath: string,
+  exporterFileType?: string,
+  container?: string,
+): string[] {
+  const tags = new Set<string>();
+  const text = `${presetName} ${presetPath}`.toLowerCase();
+  const fourCc = exporterFileType?.toLowerCase();
+  const add = (value: string) => {
+    if (value) tags.add(value);
+  };
+
+  if (container) add(container);
+  if (fourCc) add(fourCc);
+
+  if (container === 'mp4') {
+    add('mp4');
+    if (fourCc === 'h264') add('h264');
+    if (fourCc === 'hevc') add('hevc');
+    if (fourCc === 'mp4') add('mp4');
+    if (/3gpp|h\.?263/i.test(text)) add('h263');
+  }
+  if (container === 'mov') add('mov');
+  if (container === 'avi') add('avi');
+  if (container === 'mxf') add('mxf');
+  if (container === 'dcp') add('dcp');
+  if (container === 'm2ts') add('bluray');
+
+  if (fourCc === 'h264' || /(?:^|[^a-z])h\.?264(?:[^a-z]|$)|(?:^|[^a-z])avc(?:[^a-z]|$)/i.test(text)) {
+    add('h264');
+    add('avc');
+  }
+  if (fourCc === 'hevc' || /(?:^|[^a-z])h\.?265(?:[^a-z]|$)|(?:^|[^a-z])hevc(?:[^a-z]|$)/i.test(text)) {
+    add('hevc');
+    add('h265');
+  }
+  if (/h\.?263/i.test(text)) add('h263');
+  if (/prores/i.test(text)) {
+    add('prores');
+    add('appleprores');
+  }
+  if (/dnxhr/i.test(text)) {
+    add('dnx');
+    add('dnxhr');
+  } else if (/\bdnx(?:hd)?\b/i.test(text)) {
+    add('dnx');
+    add('dnxhd');
+  }
+  if (/avc[-\s]?intra/i.test(text)) {
+    add('avcintra');
+    add('avc');
+  }
+  if (/avc[-\s]?longg/i.test(text)) add('avclongg');
+  if (/\bxavc\b/i.test(text)) add('xavc');
+  if (/\bxdcam\b/i.test(text)) add('xdcam');
+  if (/\bhdv\b/i.test(text)) add('hdv');
+  if (/\bdv(?:cpro)?\b/i.test(text)) add('dv');
+  if (/\bwaveform\b/i.test(text) || fourCc === 'wave') {
+    add('wav');
+    add('wave');
+  }
+  if (fourCc === 'aiff' || /\baiff\b/i.test(text)) {
+    add('aiff');
+    add('aif');
+  }
+  if (fourCc === 'mp3' || /\bmp3\b/i.test(text)) add('mp3');
+  if (fourCc === 'aac' || /\baac\b/i.test(text)) add('aac');
+  if (fourCc === 'pcm' || /\bpcm\b/i.test(text)) add('pcm');
+  if (fourCc === 'jpeg' || /\bjpeg\b/i.test(text)) {
+    add('jpeg');
+    add('jpg');
+  }
+  if (fourCc === 'tiff' || /\btiff?\b/i.test(text)) {
+    add('tiff');
+    add('tif');
+  }
+  if (fourCc === 'dibb' || /\bbmp\b/i.test(text)) add('bmp');
+  if (fourCc === 'png' || /\bpng\b/i.test(text)) add('png');
+  if (fourCc === 'dpx' || /\bdpx\b/i.test(text)) add('dpx');
+  if (fourCc === 'oexr' || /\bexr\b|openexr/i.test(text)) {
+    add('exr');
+    add('openexr');
+  }
+  if (fourCc === 'tpic' || /\btarga\b|\btga\b/i.test(text)) {
+    add('tga');
+    add('targa');
+  }
+  if (fourCc === 'giff' || /\bgif\b/i.test(text)) add('gif');
+  if (container === 'mpeg2' || /mpeg[-\s]?2|\bmpg\b|\bdvd\b/i.test(text)) {
+    add('mpeg2');
+    add('mpg');
+  }
+  if (fourCc === 'flv' || /\bflv\b/i.test(text)) add('flv');
+  if (fourCc === 'wmv' || /\bwmv\b/i.test(text)) add('wmv');
+
+  return [...tags].sort();
+}
+
+function ameVersionFromPresetDirectory(directory: string): string {
+  const segments = directory.split(/[\\/]+/).filter(Boolean);
+  const mediaEncoderDirectory = [...segments]
+    .reverse()
+    .find((segment) => /^Adobe Media Encoder(?:\s|$)/i.test(segment));
+  if (mediaEncoderDirectory) {
+    return mediaEncoderDirectory.replace(/^Adobe Media Encoder\s*/i, '').trim() || 'system';
+  }
+  return basename(directory).toLowerCase() === 'presets'
+    ? basename(dirname(directory))
+    : basename(directory);
+}
+
+function buildEncoderPresetEntry(
+  presetPath: string,
+  source: EncoderPresetSource,
+  xml: string,
+): EncoderPresetEntry {
+  const exporterFileType = exporterFileTypeFromXml(xml) ?? exporterFileTypeFromDirectory(presetPath);
+  const container = containerFromExporterFileType(exporterFileType);
+  const name = displayNameFromPresetXml(xml) ?? parse(presetPath).name;
+  const entry: EncoderPresetEntry = {
+    name,
+    path: presetPath,
+    source,
+    ameVersion: ameVersionFromPresetDirectory(dirname(presetPath)),
+    formatTags: inferPresetFormatTags(name, presetPath, exporterFileType, container),
+  };
+  if (exporterFileType) entry.exporterFileType = exporterFileType;
+  if (container) entry.container = container;
+  return entry;
+}
+
+export async function inspectEncoderPreset(
+  presetPath: string,
+  source: EncoderPresetSource = 'user',
+): Promise<EncoderPresetEntry> {
+  const xml = await fs.readFile(presetPath, 'utf8');
+  return buildEncoderPresetEntry(presetPath, source, xml);
+}
+
+interface PresetScanDirectory {
+  path: string;
+  source: EncoderPresetSource;
+}
+
+function sourceFromPresetDirectory(directory: string): EncoderPresetSource {
+  return /[\\/]MediaIO[\\/]systempresets(?:[\\/]|$)/i.test(directory) ? 'system' : 'user';
+}
+
+async function userEncoderPresetDirectories(): Promise<PresetScanDirectory[]> {
   const baseDirs = [
     join(homedir(), 'Library', 'Application Support', 'Adobe', 'Common', 'AME'),
   ];
@@ -750,7 +989,7 @@ async function defaultEncoderPresetDirectories(): Promise<string[]> {
     baseDirs.push(join(process.env.APPDATA, 'Adobe', 'Common', 'AME'));
   }
 
-  const presetDirs = new Set<string>();
+  const presetDirs = new Map<string, PresetScanDirectory>();
   for (const baseDir of baseDirs) {
     let entries: Array<{ name: string; isDirectory(): boolean }>;
     try {
@@ -758,72 +997,227 @@ async function defaultEncoderPresetDirectories(): Promise<string[]> {
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
-      presetDirs.add(join(baseDir, 'Presets'));
+      presetDirs.set(join(baseDir, 'Presets'), { path: join(baseDir, 'Presets'), source: 'user' });
       continue;
     }
 
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        presetDirs.add(join(baseDir, entry.name, 'Presets'));
+        const presetDirectory = join(baseDir, entry.name, 'Presets');
+        presetDirs.set(presetDirectory, { path: presetDirectory, source: 'user' });
       }
     }
   }
-  return [...presetDirs].sort();
+  return [...presetDirs.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function ameVersionFromPresetDirectory(directory: string): string {
-  return basename(directory).toLowerCase() === 'presets'
-    ? basename(dirname(directory))
-    : basename(directory);
+async function localConfigValues(): Promise<Map<string, string>> {
+  const configPath = join(homedir(), '.codex', 'config.toml');
+  const values = new Map<string, string>();
+  let content = '';
+  try {
+    content = await fs.readFile(configPath, 'utf8');
+  } catch {
+    return values;
+  }
+  for (const line of content.split(/\r?\n/)) {
+    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$/.exec(line);
+    if (!match?.[1] || !match[2]) continue;
+    const value = match[2].replace(/^['"]|['"]$/g, '').trim();
+    if (value) values.set(match[1], value);
+  }
+  return values;
 }
 
-export async function getEncoderPresets(directories?: string[]): Promise<EncoderPresetDiscovery> {
-  const searchedDirectories = directories && directories.length > 0
-    ? directories
-    : await defaultEncoderPresetDirectories();
-  const presets: EncoderPresetEntry[] = [];
+async function systemEncoderPresetDirectories(): Promise<PresetScanDirectory[]> {
+  const configured = await localConfigValues();
+  const pick = (envKeys: string[], configKeys: string[]): string[] => {
+    const values: string[] = [];
+    for (const key of envKeys) {
+      const value = process.env[key]?.trim();
+      if (value) values.push(value);
+    }
+    for (const key of configKeys) {
+      const value = configured.get(key)?.trim();
+      if (value) values.push(value);
+    }
+    return values;
+  };
+  const roots = new Set<string>();
+  const pushRoot = (value: string) => {
+    const normalized = value.replace(/\/+$/, '').replace(/\\+$/, '');
+    if (normalized) roots.add(normalized);
+  };
+
+  for (const value of pick(
+    ['PREMIERE_AME_PATH', 'ADOBE_AME_PATH'],
+    ['PREMIERE_AME_PATH', 'ADOBE_AME_PATH'],
+  )) {
+    pushRoot(/\.exe$/i.test(value) ? dirname(value) : value);
+  }
+  for (const value of pick(
+    ['PREMIERE_ADOBE_ROOT', 'ADOBE_ROOT', 'ADOBE_HOME'],
+    ['PREMIERE_ADOBE_ROOT', 'ADOBE_ROOT', 'ADOBE_HOME'],
+  )) {
+    pushRoot(value);
+  }
+
+  if (platform() === 'win32') {
+    for (const drive of ['C', 'D', 'E', 'F', 'G', 'H']) {
+      pushRoot(`${drive}:\\Support\\Adobe`);
+      pushRoot(`${drive}:\\Adobe`);
+    }
+    for (const root of [process.env.ProgramFiles, process.env['ProgramFiles(x86)']]) {
+      if (root) pushRoot(join(root, 'Adobe'));
+    }
+  } else if (platform() === 'darwin') {
+    pushRoot('/Applications');
+  }
+
+  const ameInstalls = new Set<string>();
+  for (const root of roots) {
+    const queue: Array<{ directory: string; depth: number }> = [{ directory: root, depth: 0 }];
+    const visited = new Set<string>();
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) break;
+      const currentKey = current.directory.toLowerCase();
+      if (visited.has(currentKey) || current.depth > 3) continue;
+      visited.add(currentKey);
+
+      if (/^Adobe Media Encoder(?: \d+(?:\.\d+)*)?$/i.test(basename(current.directory))) {
+        ameInstalls.add(current.directory);
+        continue;
+      }
+
+      let entries: Array<{ name: string; isDirectory(): boolean }>;
+      try {
+        entries = await fs.readdir(current.directory, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const child = join(current.directory, entry.name);
+        if (/^Adobe Media Encoder(?: \d+(?:\.\d+)*)?$/i.test(entry.name)) {
+          ameInstalls.add(child);
+        } else if (current.depth < 3 && /^(me|adobe|common|creative cloud)$/i.test(entry.name)) {
+          queue.push({ directory: child, depth: current.depth + 1 });
+        }
+      }
+    }
+  }
+
+  const presetDirectories = new Map<string, PresetScanDirectory>();
+  for (const ameInstall of ameInstalls) {
+    const queue: Array<{ directory: string; depth: number }> = [{ directory: ameInstall, depth: 0 }];
+    const visited = new Set<string>();
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) break;
+      const currentKey = current.directory.toLowerCase();
+      if (visited.has(currentKey) || current.depth > 5) continue;
+      visited.add(currentKey);
+      if (basename(current.directory).toLowerCase() === 'systempresets') {
+        presetDirectories.set(current.directory, { path: current.directory, source: 'system' });
+        continue;
+      }
+      let entries: Array<{ name: string; isDirectory(): boolean }>;
+      try {
+        entries = await fs.readdir(current.directory, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          queue.push({ directory: join(current.directory, entry.name), depth: current.depth + 1 });
+        }
+      }
+    }
+  }
+
+  return [...presetDirectories.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+async function collectPresetFiles(directory: string): Promise<{ files: string[]; errors: Array<{ path: string; error: string }> }> {
+  const files: string[] = [];
   const errors: Array<{ path: string; error: string }> = [];
-
-  for (const directory of searchedDirectories) {
-    let entries: Array<{ name: string; isFile(): boolean }>;
+  const queue: Array<{ path: string; depth: number }> = [{ path: directory, depth: 0 }];
+  const visited = new Set<string>();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) break;
+    const currentKey = current.path.toLowerCase();
+    if (visited.has(currentKey) || current.depth > 6) continue;
+    visited.add(currentKey);
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
     try {
-      entries = await fs.readdir(directory, { withFileTypes: true });
+      entries = await fs.readdir(current.path, { withFileTypes: true });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-        errors.push({ path: directory, error: error instanceof Error ? error.message : String(error) });
+        errors.push({ path: current.path, error: error instanceof Error ? error.message : String(error) });
       }
       continue;
     }
-
     for (const entry of entries) {
-      if (!entry.isFile() || extname(entry.name).toLowerCase() !== '.epr') continue;
-      const presetPath = join(directory, entry.name);
+      const entryPath = join(current.path, entry.name);
+      if (entry.isFile() && extname(entry.name).toLowerCase() === '.epr') files.push(entryPath);
+      else if (entry.isDirectory()) queue.push({ path: entryPath, depth: current.depth + 1 });
+    }
+  }
+  return { files, errors };
+}
+
+export async function getEncoderPresets(directories?: string[]): Promise<EncoderPresetDiscovery> {
+  const scanDirectories: PresetScanDirectory[] = directories && directories.length > 0
+    ? directories.map((directory) => ({ path: directory, source: sourceFromPresetDirectory(directory) }))
+    : [
+        ...await userEncoderPresetDirectories(),
+        ...await systemEncoderPresetDirectories(),
+      ];
+  const searchedDirectories = scanDirectories.map((directory) => directory.path);
+  const presets: EncoderPresetEntry[] = [];
+  const errors: Array<{ path: string; error: string }> = [];
+  const seenPresets = new Set<string>();
+
+  for (const scanDirectory of scanDirectories) {
+    const collected = await collectPresetFiles(scanDirectory.path);
+    errors.push(...collected.errors);
+    for (const presetPath of collected.files) {
+      const presetKey = presetPath.toLowerCase();
+      if (seenPresets.has(presetKey)) continue;
+      seenPresets.add(presetKey);
       try {
         await fs.access(presetPath, fsConstants.R_OK);
-        const xml = await fs.readFile(presetPath, 'utf8');
-        presets.push({
-          name: displayNameFromPresetXml(xml) ?? parse(entry.name).name,
-          path: presetPath,
-          source: 'user',
-          ameVersion: ameVersionFromPresetDirectory(directory),
-        });
+        presets.push(await inspectEncoderPreset(presetPath, scanDirectory.source));
       } catch (error) {
         errors.push({ path: presetPath, error: error instanceof Error ? error.message : String(error) });
       }
     }
   }
 
-  presets.sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
+  presets.sort((a, b) => {
+    if (a.source !== b.source) return a.source === 'system' ? -1 : 1;
+    return a.name.localeCompare(b.name) || a.path.localeCompare(b.path);
+  });
+  const formats = [...new Set(presets.flatMap((preset) => preset.formatTags ?? []))].sort();
+  const systemCount = presets.filter((preset) => preset.source === 'system').length;
+  const userCount = presets.length - systemCount;
   return {
     success: true,
     presets,
     count: presets.length,
+    userCount,
+    systemCount,
     searchedDirectories,
     errors,
+    formats,
     factoryPresets: {
-      supported: false,
-      note: 'Factory preset enumeration is not complete or supported; save a user .epr preset in AME and rediscover it here.',
+      supported: systemCount > 0,
+      note: systemCount > 0
+        ? 'Installed Adobe Media Encoder system presets are included; user presets remain available for explicit presetPath or presetName selection.'
+        : 'No installed AME system preset directory was found; user .epr presets are still discoverable.',
     },
   };
 }

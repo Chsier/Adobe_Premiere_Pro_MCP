@@ -29,8 +29,18 @@ This fork tracks upstream `hetpatel-11/Adobe_Premiere_Pro_MCP` and keeps the sam
 tool catalog and installation model. It adds verified hardening for common
 Premiere scripting failures:
 
-- `export_sequence` falls back to Premiere's direct exporter when Adobe Media
-  Encoder is unavailable or the Media Encoder queue returns no job id.
+- `export_sequence` defaults to the Adobe Media Encoder queue when AME is
+  available and falls back to Premiere's direct exporter only when the queue is
+  unavailable or returns no job id.
+- `format` is a real selector: when no preset is supplied, the server discovers
+  installed AME system presets and chooses a matching preset; when a preset is
+  supplied, the requested format is validated instead of silently allowing a
+  different container. If `format` is omitted, the output extension is used
+  when recognised, otherwise the default is MP4/H.264.
+- AME preset discovery now includes installed `MediaIO/systempresets`
+  directories, parses each preset's `ExporterFileType` FourCC, and reports the
+  source, container, and format tags. This prevents same-name MP4 and MOV
+  presets from being chosen interchangeably.
 - Windows export paths are normalized to native backslashes, and the result
   reports the method, direct result, output existence, and encoder availability.
 - Media Encoder discovery supports explicit paths, local configuration, the
@@ -169,6 +179,9 @@ Current catalog status as of August 31, 2026:
 
 Most recent completed local live validation:
 
+- `export_sequence` with `format: "mp4"` selected the AME H264 system preset and produced a
+  1920x1080, 30 fps, 450-frame, 15.000 s H.264/AAC `.mp4`; `ffprobe` verified the
+  container, codec, duration, and audio stream.
 - `283` catalog tools; `get_capabilities` reports `catalog.advertised` vs `catalog.tools`, local installation, and optional live connection state. `verify_premiere_connection` is the canonical read-only bridge and host readiness check
 - `0` known parked or placeholder tools are advertised
 - `import_ae_comps` is intentionally not advertised because Premiere returned `false` for real `.aep` fixtures in this environment and a generic `.aep` import can wedge the CEP bridge
@@ -375,8 +388,8 @@ All `283` catalog tools have an implementation. `tools/list` advertises a small 
 
 | Tools | What they do |
 | :--- | :--- |
-| `validate_project_for_export` / `get_encoder_presets` / `get_export_file_extension` | Validate a delivery, discover readable user `.epr` presets, and resolve output extensions. |
-| `export_sequence` / `add_to_render_queue` | Queue a sequence through Adobe Media Encoder using a real preset path or exact preset name. |
+| `validate_project_for_export` / `get_encoder_presets` / `get_export_file_extension` | Validate a delivery, discover user and installed system `.epr` presets with container metadata, and resolve output extensions. |
+| `export_sequence` / `add_to_render_queue` | Queue a sequence through Adobe Media Encoder. Pass `format` for automatic system-preset selection, or pass an exact preset path/name when you want manual control. |
 | `get_render_queue_status` / `start_batch_encode` | Report queue-monitoring availability or start supported batch encoding. |
 | `export_frame` / `capture_frame` | Write a still image from a sequence or capture a frame. |
 | `export_as_fcp_xml` / `export_aaf` / `export_omf` | Export supported interchange formats. |

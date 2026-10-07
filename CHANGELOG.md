@@ -4,6 +4,11 @@ All notable changes are documented here. Releases use semantic versioning.
 
 ## [Unreleased]
 
+- `export_sequence` now defaults to AME-first export and treats `format` as a
+  real selector. Installed AME system presets are discovered recursively, their
+  `ExporterFileType` FourCC is parsed, and an automatic format chooses a
+  matching preset instead of silently accepting a same-name QuickTime preset.
+  Explicit preset/format conflicts are rejected before queueing.
 - Added a direct Premiere export fallback when Adobe Media Encoder is absent or
   `encodeSequence` returns no job id. Windows paths are normalized to native
   backslashes, and results report `method`, `directResult`, `outputExists`, and

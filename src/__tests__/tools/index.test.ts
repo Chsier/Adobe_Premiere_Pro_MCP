@@ -2368,6 +2368,33 @@ describe('PremiereProTools', () => {
       expect(result.count).toBe(0);
       expect(result.errors).toEqual([]);
     });
+
+    it('parses ExporterFileType FourCC metadata from nested system presets', async () => {
+      const root = await fs.mkdtemp(join(tmpdir(), 'premiere-system-presets-test-'));
+      const presetDir = join(root, 'MediaIO', 'systempresets', '4E49434B_48323634');
+      await fs.mkdir(presetDir, { recursive: true });
+      const presetPath = join(presetDir, '00 - Match Source - High bitrate.epr');
+      await fs.writeFile(
+        presetPath,
+        '<Preset><PresetName>Match Source - High bitrate</PresetName><ExporterFileType>1211250228</ExporterFileType></Preset>',
+        'utf8',
+      );
+
+      const result = await tools.executeTool('get_encoder_presets', {
+        directories: [presetDir],
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.count).toBe(1);
+      expect(result.systemCount).toBe(1);
+      expect(result.presets[0]).toEqual(expect.objectContaining({
+        path: presetPath,
+        source: 'system',
+        exporterFileType: 'H264',
+        container: 'mp4',
+      }));
+      expect(result.presets[0].formatTags).toEqual(expect.arrayContaining(['h264', 'mp4']));
+    });
   });
 
   describe('export_sequence', () => {
@@ -2377,28 +2404,100 @@ describe('PremiereProTools', () => {
     //   2. Wrapper unconditionally returned {success:true} even when bridge.renderSequence
     //      reported {success:false} — false-positive that hid AME-never-received errors.
 
-    it('rejects calls without presetPath instead of substituting a string literal', async () => {
-      const result = await tools.executeTool('export_sequence', {
-        sequenceId: 'seq-1',
-        outputPath: '/tmp/out.mp4',
+    it('auto-selects the MP4 H.264 system preset and keeps AME first', async () => {
+      const root = await fs.mkdtemp(join(tmpdir(), 'premiere-format-presets-'));
+      const h264Path = join(root, 'H264 Match Source - High bitrate.epr');
+      const movPath = join(root, 'H264 Match Source - High bitrate (MooV).epr');
+      await fs.writeFile(h264Path, '<Preset><PresetName>H264 Match Source - High bitrate</PresetName><ExporterFileType>1211250228</ExporterFileType></Preset>', 'utf8');
+      await fs.writeFile(movPath, '<Preset><PresetName>H264 Match Source - High bitrate</PresetName><ExporterFileType>1299148630</ExporterFileType></Preset>', 'utf8');
+      jest.spyOn(discovery, 'getEncoderPresets').mockResolvedValue({
+        success: true,
+        presets: [
+          { name: 'H264 Match Source - High bitrate', path: h264Path, source: 'system', ameVersion: '2025', exporterFileType: 'H264', container: 'mp4', formatTags: ['h264', 'mp4'] },
+          { name: 'H264 Match Source - High bitrate', path: movPath, source: 'system', ameVersion: '2025', exporterFileType: 'MooV', container: 'mov', formatTags: ['h264', 'mov'] },
+        ],
+        count: 2,
+        userCount: 0,
+        systemCount: 2,
+        searchedDirectories: [root],
+        errors: [],
+        formats: ['h264', 'mov', 'mp4'],
+        factoryPresets: { supported: true, note: 'test' },
+      });
+      mockBridge.renderSequence.mockResolvedValue({
+        success: true,
+        queued: true,
+        jobID: 'job-auto-mp4',
+        status: 'queued',
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/presetPath or presetName required/);
-      expect(result.hint).toMatch(/\.epr/);
-      expect(mockBridge.renderSequence).not.toHaveBeenCalled();
-    });
-
-    it('rejects calls without presetPath even when format is "mp4" (no H.264 fallback)', async () => {
-      // Pre-fix: format=mp4 → defaultPreset="H.264" string literal sent to encodeSequence.
       const result = await tools.executeTool('export_sequence', {
         sequenceId: 'seq-1',
-        outputPath: '/tmp/out.mp4',
+        outputPath: join(root, 'out.mp4'),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.presetPath).toBe(h264Path);
+      expect(result.format).toBe('mp4');
+      expect(result.formatSource).toBe('output_extension');
+      expect(mockBridge.renderSequence).toHaveBeenCalledWith(
+        'seq-1',
+        join(root, 'out.mp4'),
+        h264Path,
+        { sourceRange: 'entire', removeOnCompletion: true },
+      );
+    });
+
+    it('treats an explicit format as a real selector and ignores same-name presets from another container', async () => {
+      const root = await fs.mkdtemp(join(tmpdir(), 'premiere-format-select-'));
+      const h264Path = join(root, 'H264 Match Source - High bitrate.epr');
+      const movPath = join(root, 'H264 Match Source - High bitrate (MooV).epr');
+      await fs.writeFile(h264Path, '<Preset><PresetName>H264 Match Source - High bitrate</PresetName><ExporterFileType>1211250228</ExporterFileType></Preset>', 'utf8');
+      await fs.writeFile(movPath, '<Preset><PresetName>H264 Match Source - High bitrate</PresetName><ExporterFileType>1299148630</ExporterFileType></Preset>', 'utf8');
+      jest.spyOn(discovery, 'getEncoderPresets').mockResolvedValue({
+        success: true,
+        presets: [
+          { name: 'H264 Match Source - High bitrate', path: h264Path, source: 'system', ameVersion: '2025', exporterFileType: 'H264', container: 'mp4', formatTags: ['h264', 'mp4'] },
+          { name: 'H264 Match Source - High bitrate', path: movPath, source: 'system', ameVersion: '2025', exporterFileType: 'MooV', container: 'mov', formatTags: ['h264', 'mov'] },
+        ],
+        count: 2,
+        userCount: 0,
+        systemCount: 2,
+        searchedDirectories: [root],
+        errors: [],
+        formats: ['h264', 'mov', 'mp4'],
+        factoryPresets: { supported: true, note: 'test' },
+      });
+      mockBridge.renderSequence.mockResolvedValue({ success: true, queued: true, jobID: 'job-format' });
+
+      const result = await tools.executeTool('export_sequence', {
+        sequenceId: 'seq-1',
+        outputPath: join(root, 'out.mp4'),
+        format: 'mp4',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.presetPath).toBe(h264Path);
+      expect(result.formatSource).toBe('explicit');
+      expect(result.presetResolution).toEqual(expect.objectContaining({
+        requestedFormat: 'mp4',
+        exporterFileType: 'H264',
+      }));
+    });
+
+    it('rejects a MOV preset when the explicit format is MP4 instead of silently writing the wrong container', async () => {
+      const { outputPath, presetPath } = await createTempPreset();
+      await fs.writeFile(presetPath, '<Preset><PresetName>QuickTime</PresetName><ExporterFileType>1299148630</ExporterFileType></Preset>', 'utf8');
+
+      const result = await tools.executeTool('export_sequence', {
+        sequenceId: 'seq-1',
+        outputPath,
+        presetPath,
         format: 'mp4',
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/presetPath or presetName required/);
+      expect(result.error).toMatch(/presetPath.*mov preset.*format "mp4"/i);
       expect(mockBridge.renderSequence).not.toHaveBeenCalled();
     });
 
@@ -2618,15 +2717,34 @@ describe('PremiereProTools', () => {
 
   describe('add_to_render_queue', () => {
     // add_to_render_queue delegates to exportSequence — same fixes apply transitively.
-    it('rejects calls without presetPath (delegates to exportSequence guard)', async () => {
+    it('delegates to the same default MP4 system-preset selection', async () => {
+      const root = await fs.mkdtemp(join(tmpdir(), 'premiere-queue-preset-'));
+      const presetPath = join(root, 'H264 Match Source - High bitrate.epr');
+      await fs.writeFile(presetPath, '<Preset><PresetName>H264 Match Source - High bitrate</PresetName><ExporterFileType>1211250228</ExporterFileType></Preset>', 'utf8');
+      jest.spyOn(discovery, 'getEncoderPresets').mockResolvedValue({
+        success: true,
+        presets: [
+          { name: 'H264 Match Source - High bitrate', path: presetPath, source: 'system', ameVersion: '2025', exporterFileType: 'H264', container: 'mp4', formatTags: ['h264', 'mp4'] },
+        ],
+        count: 1,
+        userCount: 0,
+        systemCount: 1,
+        searchedDirectories: [root],
+        errors: [],
+        formats: ['h264', 'mp4'],
+        factoryPresets: { supported: true, note: 'test' },
+      });
+      mockBridge.renderSequence.mockResolvedValue({ success: true, queued: true, jobID: 'job-default' });
+
       const result = await tools.executeTool('add_to_render_queue', {
         sequenceId: 'seq-1',
-        outputPath: '/tmp/out.mp4',
+        outputPath: join(root, 'out.mp4'),
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/presetPath or presetName required/);
-      expect(mockBridge.renderSequence).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(result.presetPath).toBe(presetPath);
+      expect(result.format).toBe('mp4');
+      expect(mockBridge.renderSequence).toHaveBeenCalledTimes(1);
     });
 
     it('propagates bridge failure responses through the delegation', async () => {

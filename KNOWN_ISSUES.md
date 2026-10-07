@@ -220,6 +220,12 @@ Use a scratch project if you do not want those fixtures in a working edit.
 
 These issues were real and are now resolved in the current code:
 
+- `export_sequence` treated `format` as a deprecated hint and only accepted a
+  user preset path. A same-name H.264 preset could therefore silently write a
+  `.mov` file when `.mp4` was requested. The tool now discovers installed AME
+  system presets, parses their `ExporterFileType`, defaults to an MP4/H.264
+  system preset when no preset is supplied, and rejects an explicit
+  format/preset conflict before queueing.
 - bridge script validation was incorrectly rejecting valid ExtendScript
 - `import_media` could import successfully but fail to locate the new project item
 - `add_to_timeline` used the wrong Premiere API path

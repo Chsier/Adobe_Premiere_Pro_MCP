@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, parse } from 'node:path';
 import type { ToolContext, ToolModule } from '../context.js';
-import { EncoderPresetEntry, getEncoderPresets } from './discovery.js';
+import { EncoderPresetEntry, getEncoderPresets, inspectEncoderPreset } from './discovery.js';
 
 export const exportTools: ToolModule[] = [
   {
@@ -17,12 +17,12 @@ export const exportTools: ToolModule[] = [
     inputSchema: z.object({
       sequenceId: z.string().describe('The ID of the sequence to export'),
       outputPath: z.string().describe('The absolute path where the final video file will be saved'),
-      presetPath: z.string().optional().describe('Absolute path to an export preset file (.epr). Required unless presetName uniquely resolves through get_encoder_presets.'),
-      presetName: z.string().optional().describe('Exact user preset display name or filename stem. Must resolve to exactly one discovered .epr preset.'),
+      presetPath: z.string().optional().describe('Absolute path to an export preset file (.epr). When omitted, format selects a matching installed AME system preset.'),
+      presetName: z.string().optional().describe('Exact preset display name or filename stem. When format is also set, only presets matching that format are considered.'),
       sourceRange: z.enum(['entire', 'in_out', 'work_area']).optional().describe('Export source range. Defaults to entire. Requested ranges are never silently substituted.'),
       allowOverwrite: z.boolean().optional().describe('Allow writing to an existing output file. Defaults to false.'),
       removeOnCompletion: z.boolean().optional().describe('Pass AME removeOnCompletion. Defaults to true to preserve existing queue behavior.'),
-      format: z.enum(['mp4', 'mov', 'avi', 'h264', 'prores']).optional().describe('Deprecated hint only; the .epr preset controls codec/container.'),
+      format: z.string().optional().describe('Requested export format, for example mp4 (default), mov, mxf, h264, hevc, prores, dnxhd, dnxhr, avi, flv, wmv, mpeg2, wav, aiff, mp3, aac, png, tiff, jpeg, gif, dpx, or exr. Explicit format is validated against presetPath or presetName and used to choose a system preset when neither is supplied.'),
       quality: z.enum(['low', 'medium', 'high', 'maximum']).optional().describe('Deprecated hint only; the .epr preset controls quality.'),
       resolution: z.string().optional().describe('Deprecated hint only; the .epr preset controls resolution.')
     }),
@@ -46,13 +46,14 @@ export const exportTools: ToolModule[] = [
       sequenceId: z.string().describe('The ID of the sequence to render'),
       outputPath: z.string().describe('Output file path'),
       presetPath: z.string().optional().describe('Export preset file path'),
-      presetName: z.string().optional().describe('Exact user preset display name or filename stem. Must resolve to exactly one discovered .epr preset.'),
+      presetName: z.string().optional().describe('Exact preset display name or filename stem. When format is also set, only presets matching that format are considered.'),
       sourceRange: z.enum(['entire', 'in_out', 'work_area']).optional().describe('Export source range. Defaults to entire.'),
       allowOverwrite: z.boolean().optional().describe('Allow writing to an existing output file. Defaults to false.'),
       removeOnCompletion: z.boolean().optional().describe('Pass AME removeOnCompletion. Defaults to true.'),
-      startImmediately: z.boolean().optional().describe('Whether to start rendering immediately (default: false)')
+      startImmediately: z.boolean().optional().describe('Whether to start rendering immediately (default: false)'),
+      format: z.string().optional().describe('Requested export format. Defaults to the outputPath extension when it is recognised, otherwise mp4.')
     }),
-    run: (ctx, args) => addToRenderQueue(ctx, { sequenceId: args.sequenceId, outputPath: args.outputPath, presetPath: args.presetPath, presetName: args.presetName, sourceRange: args.sourceRange, allowOverwrite: args.allowOverwrite, removeOnCompletion: args.removeOnCompletion, startImmediately: args.startImmediately }),
+    run: (ctx, args) => addToRenderQueue(ctx, { sequenceId: args.sequenceId, outputPath: args.outputPath, presetPath: args.presetPath, presetName: args.presetName, sourceRange: args.sourceRange, allowOverwrite: args.allowOverwrite, removeOnCompletion: args.removeOnCompletion, startImmediately: args.startImmediately, format: args.format }),
   },
   {
     name: 'get_render_queue_status',
@@ -103,27 +104,325 @@ interface AddToRenderQueueArgs extends ExportSequenceArgs {
   startImmediately?: boolean;
 }
 
-async function resolvePresetPath(presetPath?: string, presetName?: string): Promise<
+const FORMAT_ALIASES: Record<string, string> = {
+  mp4: 'mp4',
+  m4v: 'mp4',
+  mpeg4: 'mp4',
+  'mpeg-4': 'mp4',
+  '3gp': 'mp4',
+  mov: 'mov',
+  quicktime: 'mov',
+  qt: 'mov',
+  avi: 'avi',
+  mxf: 'mxf',
+  'mxf-op1a': 'mxf',
+  op1a: 'mxf',
+  dcp: 'dcp',
+  flv: 'flv',
+  wmv: 'wmv',
+  mpg: 'mpeg2',
+  mpeg: 'mpeg2',
+  mpeg2: 'mpeg2',
+  'mpeg-2': 'mpeg2',
+  h264: 'h264',
+  'h.264': 'h264',
+  avc: 'h264',
+  x264: 'h264',
+  hevc: 'hevc',
+  h265: 'hevc',
+  'h.265': 'hevc',
+  hvc1: 'hevc',
+  prores: 'prores',
+  appleprores: 'prores',
+  prores422: 'prores',
+  dnx: 'dnx',
+  dnxhd: 'dnxhd',
+  dnxhr: 'dnxhr',
+  avcintra: 'avcintra',
+  'avc-intra': 'avcintra',
+  xavc: 'xavc',
+  xdcam: 'xdcam',
+  hdv: 'hdv',
+  dv: 'dv',
+  wav: 'wav',
+  wave: 'wav',
+  pcm: 'pcm',
+  aiff: 'aiff',
+  aif: 'aiff',
+  mp3: 'mp3',
+  aac: 'aac',
+  m4a: 'aac',
+  png: 'png',
+  tiff: 'tiff',
+  tif: 'tiff',
+  jpeg: 'jpeg',
+  jpg: 'jpeg',
+  bmp: 'bmp',
+  dpx: 'dpx',
+  exr: 'exr',
+  openexr: 'exr',
+  tga: 'tga',
+  targa: 'tga',
+  gif: 'gif',
+};
+
+const FORMAT_EXTENSIONS: Record<string, string[]> = {
+  mp4: ['.mp4', '.m4v'],
+  mov: ['.mov', '.qt'],
+  avi: ['.avi'],
+  mxf: ['.mxf'],
+  dcp: ['.dcp'],
+  flv: ['.flv'],
+  wmv: ['.wmv'],
+  mpeg2: ['.mpg', '.mpeg', '.m2v', '.vob'],
+  h264: ['.mp4', '.m4v', '.mov'],
+  hevc: ['.mp4', '.m4v', '.mov'],
+  prores: ['.mov', '.mxf'],
+  dnx: ['.mxf', '.mov'],
+  dnxhd: ['.mxf', '.mov'],
+  dnxhr: ['.mxf', '.mov'],
+  avcintra: ['.mxf'],
+  xavc: ['.mxf'],
+  xdcam: ['.mxf'],
+  hdv: ['.m2t', '.m2ts', '.ts'],
+  dv: ['.avi', '.mov', '.mxf'],
+  wav: ['.wav'],
+  pcm: ['.wav', '.aif', '.aiff', '.pcm'],
+  aiff: ['.aif', '.aiff'],
+  mp3: ['.mp3'],
+  aac: ['.aac', '.m4a'],
+  png: ['.png'],
+  tiff: ['.tif', '.tiff'],
+  jpeg: ['.jpg', '.jpeg'],
+  bmp: ['.bmp'],
+  dpx: ['.dpx'],
+  exr: ['.exr'],
+  tga: ['.tga'],
+  gif: ['.gif'],
+};
+
+const OUTPUT_EXTENSION_FORMATS: Record<string, string> = {
+  '.mp4': 'mp4',
+  '.m4v': 'mp4',
+  '.mov': 'mov',
+  '.qt': 'mov',
+  '.avi': 'avi',
+  '.mxf': 'mxf',
+  '.dcp': 'dcp',
+  '.flv': 'flv',
+  '.wmv': 'wmv',
+  '.mpg': 'mpeg2',
+  '.mpeg': 'mpeg2',
+  '.m2v': 'mpeg2',
+  '.vob': 'mpeg2',
+  '.m2t': 'hdv',
+  '.m2ts': 'hdv',
+  '.ts': 'hdv',
+  '.wav': 'wav',
+  '.aif': 'aiff',
+  '.aiff': 'aiff',
+  '.mp3': 'mp3',
+  '.aac': 'aac',
+  '.m4a': 'aac',
+  '.png': 'png',
+  '.tif': 'tiff',
+  '.tiff': 'tiff',
+  '.jpg': 'jpeg',
+  '.jpeg': 'jpeg',
+  '.bmp': 'bmp',
+  '.dpx': 'dpx',
+  '.exr': 'exr',
+  '.tga': 'tga',
+  '.gif': 'gif',
+};
+
+function normalizeRequestedFormat(value?: string): string | undefined {
+  if (!value || !value.trim()) return undefined;
+  const normalized = value.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return FORMAT_ALIASES[normalized] ?? normalized;
+}
+
+function formatFromOutputExtension(outputPath: string): string | undefined {
+  return OUTPUT_EXTENSION_FORMATS[extname(outputPath).toLowerCase()];
+}
+
+function supportedPresetFormats(presets: EncoderPresetEntry[]): string[] {
+  const formats = [...new Set(Object.values(FORMAT_ALIASES))];
+  return formats
+    .filter((format) => presets.some((preset) => presetMatchesFormat(preset, format)))
+    .sort();
+}
+
+function presetMatchesFormat(preset: EncoderPresetEntry, requestedFormat: string): boolean {
+  const format = normalizeRequestedFormat(requestedFormat) ?? requestedFormat;
+  const tags = new Set((preset.formatTags ?? []).map((tag) => normalizeRequestedFormat(tag) ?? tag));
+  if (tags.has(format)) return true;
+
+  switch (format) {
+    case 'mp4':
+      return preset.container === 'mp4';
+    case 'mov':
+      return preset.container === 'mov';
+    case 'avi':
+      return preset.container === 'avi';
+    case 'mxf':
+      return preset.container === 'mxf';
+    case 'dcp':
+      return preset.container === 'dcp';
+    case 'flv':
+      return preset.container === 'flv';
+    case 'wmv':
+      return preset.container === 'wmv';
+    case 'mpeg2':
+      return preset.container === 'mpeg2';
+    case 'h264':
+      return tags.has('h264') || preset.exporterFileType === 'H264';
+    case 'hevc':
+      return tags.has('hevc') || preset.exporterFileType === 'HEVC';
+    case 'prores':
+      return tags.has('prores') || tags.has('appleprores');
+    case 'dnx':
+      return tags.has('dnx');
+    case 'dnxhd':
+      return tags.has('dnxhd') && !tags.has('dnxhr');
+    case 'dnxhr':
+      return tags.has('dnxhr');
+    case 'avcintra':
+      return tags.has('avcintra');
+    case 'xavc':
+      return tags.has('xavc');
+    case 'xdcam':
+      return tags.has('xdcam');
+    case 'hdv':
+      return tags.has('hdv');
+    case 'dv':
+      return tags.has('dv');
+    case 'pcm':
+      return tags.has('pcm') || preset.container === 'wav' || preset.container === 'aiff';
+    default:
+      return false;
+  }
+}
+
+function presetFormatScore(preset: EncoderPresetEntry, requestedFormat: string): number {
+  const format = normalizeRequestedFormat(requestedFormat) ?? requestedFormat;
+  const name = preset.name.toLowerCase();
+  const text = `${preset.name} ${preset.path}`.toLowerCase();
+  let score = preset.source === 'system' ? 10000 : 1000;
+
+  score += presetMatchesFormat(preset, format) ? 1000 : 0;
+  if (/match source/.test(text)) score += 500;
+  if (/\b(?:00|01)\b/.test(name)) score += 60;
+  if (/high bitrate|high quality|highest quality/.test(text)) score += 120;
+
+  if (format === 'mp4' || format === 'h264') {
+    if (preset.exporterFileType === 'H264') score += 800;
+    if (/\b00\b/.test(name) && /match source/.test(text)) score += 250;
+    if (/high bitrate/.test(text)) score += 80;
+  }
+  if (format === 'hevc') {
+    if (preset.exporterFileType === 'HEVC') score += 800;
+    if (/high bitrate/.test(text)) score += 80;
+  }
+  if (format === 'mov' && /\b01\b/.test(name) && /match source/.test(text)) score += 300;
+  if (format === 'prores' && /apple prores 422 hq/.test(text)) score += 500;
+  if (format === 'prores' && /^apple prores 422 hq\b/.test(name)) score += 300;
+  if (format === 'prores' && /adobe stock/.test(text)) score -= 200;
+  if (format === 'dnx' && /dnx hq|match source/.test(text)) score += 300;
+  if (format === 'dnxhd' && /dnx hq/.test(text)) score += 400;
+  if (format === 'dnxhr' && /dnxhr hq/.test(text)) score += 400;
+  if (format === 'mxf' && /match source/.test(text)) score += 250;
+  if (format === 'wav' && /waveform|48khz|16-bit/.test(text)) score += 250;
+  if (format === 'mp3' && /192|256|high quality/.test(text)) score += 180;
+  if (format === 'png' && /match source/.test(text) && !/alpha/.test(text)) score += 120;
+
+  if (/proxy|\blb\b|low bitrate|medium bitrate|draft|middle|mono|stereo/.test(text)) score -= 220;
+  if (/hlg|\bpq\b|2020|alpha/.test(text)) score -= 120;
+  if (/without audio/.test(text)) score -= 30;
+  return score;
+}
+
+function chooseFormatPreset(presets: EncoderPresetEntry[], requestedFormat: string): EncoderPresetEntry | undefined {
+  const matches = presets.filter((preset) => presetMatchesFormat(preset, requestedFormat));
+  return matches
+    .slice()
+    .sort((left, right) => {
+      const scoreDifference = presetFormatScore(right, requestedFormat) - presetFormatScore(left, requestedFormat);
+      if (scoreDifference !== 0) return scoreDifference;
+      return left.path.localeCompare(right.path);
+    })[0];
+}
+
+async function resolvePresetPath(
+  presetPath?: string,
+  presetName?: string,
+  requestedFormat?: string,
+): Promise<
   { success: true; presetPath: string; presetName?: string; presetResolution?: any } |
-  { success: false; error: string; presetName?: string; matches?: EncoderPresetEntry[]; searchedDirectories?: string[] }
+  { success: false; error: string; presetName?: string; matches?: EncoderPresetEntry[]; searchedDirectories?: string[]; availableFormats?: string[] }
 > {
   if (presetPath && presetName) {
     return { success: false, error: 'Provide either presetPath or presetName, not both.', presetName };
   }
 
   if (presetPath) {
+    if (requestedFormat) {
+      try {
+        const preset = await inspectEncoderPreset(presetPath);
+        if (!presetMatchesFormat(preset, requestedFormat)) {
+          const detected = preset.container ?? preset.exporterFileType ?? 'unknown';
+          return {
+            success: false,
+            error: `presetPath "${presetPath}" is a ${detected} preset, but format "${requestedFormat}" was requested. Pass a matching preset or omit format to let the preset control the output.`,
+            matches: [preset],
+          };
+        }
+      } catch (error) {
+        return {
+          success: false,
+          error: `Could not inspect presetPath "${presetPath}" while validating format "${requestedFormat}": ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
     return { success: true, presetPath };
   }
 
+  const discovery = await getEncoderPresets();
+  const availableFormats = supportedPresetFormats(discovery.presets);
   if (!presetName) {
+    const format = requestedFormat ?? 'mp4';
+    const match = chooseFormatPreset(discovery.presets, format);
+    if (!match) {
+      return {
+        success: false,
+        error: `No discovered .epr preset matches format "${format}". Available discovered formats: ${availableFormats.join(', ') || 'none'}. Install or save a matching AME preset, or pass presetPath.`,
+        searchedDirectories: discovery.searchedDirectories,
+        availableFormats,
+      };
+    }
     return {
-      success: false,
-      error: 'presetPath or presetName required — Adobe encodeSequence requires an absolute .epr preset file.',
+      success: true,
+      presetPath: match.path,
+      presetName: match.name,
+      presetResolution: {
+        method: 'format_default',
+        requestedFormat: format,
+        name: match.name,
+        path: match.path,
+        source: match.source,
+        container: match.container,
+        exporterFileType: match.exporterFileType,
+        ameVersion: match.ameVersion,
+      },
     };
   }
 
-  const discovery = await getEncoderPresets();
-  const matches = discovery.presets.filter((preset) => preset.name === presetName || parse(preset.path).name === presetName);
+  const namedMatches = discovery.presets.filter(
+    (preset) => preset.name === presetName || parse(preset.path).name === presetName,
+  );
+  const matches = requestedFormat
+    ? namedMatches.filter((preset) => presetMatchesFormat(preset, requestedFormat))
+    : namedMatches;
   if (matches.length === 1) {
     const [match] = matches as [EncoderPresetEntry];
     return {
@@ -134,6 +433,10 @@ async function resolvePresetPath(presetPath?: string, presetName?: string): Prom
         method: 'exact_name',
         name: match.name,
         path: match.path,
+        source: match.source,
+        container: match.container,
+        exporterFileType: match.exporterFileType,
+        requestedFormat,
         ameVersion: match.ameVersion,
       },
     };
@@ -145,17 +448,35 @@ async function resolvePresetPath(presetPath?: string, presetName?: string): Prom
       presetName,
       matches,
       searchedDirectories: discovery.searchedDirectories,
+      availableFormats,
     };
   }
-  return {
-    success: false,
-    error: `presetName "${presetName}" was not found in user AME presets.`,
-    presetName,
-    searchedDirectories: discovery.searchedDirectories,
-  };
+    const failure: {
+      success: false;
+      error: string;
+      presetName: string;
+      searchedDirectories: string[];
+      availableFormats: string[];
+      matches?: EncoderPresetEntry[];
+    } = {
+      success: false,
+      error: requestedFormat
+        ? `presetName "${presetName}" was not found for format "${requestedFormat}" in discovered AME presets.`
+        : `presetName "${presetName}" was not found in discovered AME presets.`,
+      presetName,
+      searchedDirectories: discovery.searchedDirectories,
+      availableFormats,
+    };
+    if (namedMatches.length > 0) failure.matches = namedMatches;
+    return failure;
 }
 
-async function validateExportPaths(outputPath: string, presetPath: string, allowOverwrite = false): Promise<Array<{ code: string; message: string; path?: string }>> {
+async function validateExportPaths(
+  outputPath: string,
+  presetPath: string,
+  allowOverwrite = false,
+  requestedFormat?: string,
+): Promise<Array<{ code: string; message: string; path?: string }>> {
   const errors: Array<{ code: string; message: string; path?: string }> = [];
 
   if (!isAbsolute(presetPath)) {
@@ -173,6 +494,19 @@ async function validateExportPaths(outputPath: string, presetPath: string, allow
   if (!isAbsolute(outputPath)) {
     errors.push({ code: 'OUTPUT_PATH_NOT_ABSOLUTE', message: 'outputPath must be absolute.', path: outputPath });
   } else {
+    const normalizedFormat = normalizeRequestedFormat(requestedFormat);
+    const outputExtension = extname(outputPath).toLowerCase();
+    if (normalizedFormat && outputExtension) {
+      const expectedExtensions = FORMAT_EXTENSIONS[normalizedFormat];
+      if (expectedExtensions && !expectedExtensions.includes(outputExtension)) {
+        errors.push({
+          code: 'OUTPUT_FORMAT_MISMATCH',
+          message: `outputPath ends in ${outputExtension}, which does not match requested format "${normalizedFormat}". Expected ${expectedExtensions.join(' or ')}.`,
+          path: outputPath,
+        });
+      }
+    }
+
     const outputDirectory = dirname(outputPath);
     try {
       const stat = await fs.stat(outputDirectory);
@@ -196,9 +530,8 @@ async function validateExportPaths(outputPath: string, presetPath: string, allow
   return errors;
 }
 
-function deprecatedExportOptionWarnings(format?: string, quality?: string, resolution?: string): Array<{ code: string; message: string; value?: string }> {
+function deprecatedExportOptionWarnings(quality?: string, resolution?: string): Array<{ code: string; message: string; value?: string }> {
   const warnings: Array<{ code: string; message: string; value?: string }> = [];
-  if (format) warnings.push({ code: 'FORMAT_IGNORED', message: 'format is deprecated for export_sequence; the .epr preset controls the container and codec.', value: format });
   if (quality) warnings.push({ code: 'QUALITY_IGNORED', message: 'quality is deprecated for export_sequence; the .epr preset controls export quality.', value: quality });
   if (resolution) warnings.push({ code: 'RESOLUTION_IGNORED', message: 'resolution is deprecated for export_sequence; the .epr preset controls output dimensions.', value: resolution });
   return warnings;
@@ -271,6 +604,43 @@ async function findExportArtifact(outputPath: string, sinceMs: number): Promise<
   return candidates[0] ?? null;
 }
 
+interface FormatSelection {
+  format?: string;
+  source: 'explicit' | 'output_extension' | 'default' | 'preset';
+  error?: string;
+  availableFormats?: string[];
+}
+
+function selectExportFormat(
+  format: string | undefined,
+  outputPath: string,
+  hasPreset: boolean,
+): FormatSelection {
+  if (format?.trim()) {
+    const normalized = normalizeRequestedFormat(format)!;
+    if (!Object.prototype.hasOwnProperty.call(FORMAT_ALIASES, normalized)) {
+      return {
+        source: 'explicit',
+        error: `Unsupported format "${format}". Supported values include: ${[...new Set(Object.values(FORMAT_ALIASES))].sort().join(', ')}.`,
+        availableFormats: [...new Set(Object.values(FORMAT_ALIASES))].sort(),
+      };
+    }
+    return { format: normalized, source: 'explicit' };
+  }
+
+  if (hasPreset) return { source: 'preset' };
+
+  const inferred = formatFromOutputExtension(outputPath);
+  if (inferred) return { format: inferred, source: 'output_extension' };
+  if (extname(outputPath) === '') return { format: 'mp4', source: 'default' };
+
+  return {
+    source: 'default',
+    error: `Could not infer an export format from outputPath "${outputPath}". Pass format explicitly or use a recognised extension such as .mp4, .mov, .mxf, .wav, or .png.`,
+    availableFormats: [...new Set(Object.values(FORMAT_ALIASES))].sort(),
+  };
+}
+
 async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promise<any> {
   const {
     sequenceId,
@@ -283,30 +653,47 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
     quality,
     resolution,
   } = args;
+  const formatSelection = selectExportFormat(format, outputPath, Boolean(args.presetPath || presetName));
+  if (formatSelection.error) {
+    return {
+      success: false,
+      error: formatSelection.error,
+      sequenceId,
+      outputPath,
+      requestedFormat: format,
+      availableFormats: formatSelection.availableFormats,
+    };
+  }
+  const effectiveFormat = formatSelection.format;
+
   // app.encoder.encodeSequence() expects an absolute path to a .epr preset file.
-  // Passing a string name like "H.264" silently fails: encodeSequence returns
-  // no jobID and the JSX bridge reports {success:false}. Reject early with a
-  // clear error rather than letting the user think a queue happened.
-  const presetResolution = await resolvePresetPath(args.presetPath, presetName);
+  // A format string is only used to discover a real .epr; it is never passed
+  // to Adobe as a preset name.
+  const presetResolution = await resolvePresetPath(args.presetPath, presetName, effectiveFormat);
   if (!presetResolution.success) {
     return {
       success: false,
       error: presetResolution.error,
-      hint: 'Create the preset in AME UI: File → Export Settings → configure → Save Preset → exports to ~/Library/Application Support/Adobe/Common/AME/<version>/Presets/. Pass that .epr path as presetPath.',
+      hint: effectiveFormat && !args.presetPath && !presetName
+        ? `No installed system preset matched format "${effectiveFormat}". Install Adobe Media Encoder, refresh its system presets, or pass a matching presetPath.`
+        : 'Create or select a matching .epr preset and pass its absolute path as presetPath.',
       sequenceId,
       outputPath,
       presetName,
       matches: presetResolution.matches,
       searchedDirectories: presetResolution.searchedDirectories,
-      format,
+      availableFormats: presetResolution.availableFormats,
+      requestedFormat: format,
+      format: effectiveFormat,
+      formatSource: formatSelection.source,
       quality,
       resolution,
     };
   }
   const presetPath = presetResolution.presetPath;
 
-  const pathErrors = await validateExportPaths(outputPath, presetPath, allowOverwrite);
-  const warnings = deprecatedExportOptionWarnings(format, quality, resolution);
+  const pathErrors = await validateExportPaths(outputPath, presetPath, allowOverwrite, effectiveFormat);
+  const warnings = deprecatedExportOptionWarnings(quality, resolution);
   if (pathErrors.length > 0) {
     return {
       success: false,
@@ -319,7 +706,9 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
       presetName,
       sourceRange,
       allowOverwrite,
-      format,
+      requestedFormat: format,
+      format: effectiveFormat,
+      formatSource: formatSelection.source,
       quality,
       resolution,
     };
@@ -346,7 +735,9 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
         sourceRange,
         allowOverwrite,
         warnings: [...warnings, ...(result.warnings ?? [])],
-        format,
+        requestedFormat: format,
+        format: effectiveFormat,
+        formatSource: formatSelection.source,
         quality,
         resolution,
       };
@@ -408,6 +799,9 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
         outputExists: false,
         allowOverwrite,
         warnings: finalWarnings,
+        requestedFormat: format,
+        format: effectiveFormat,
+        formatSource: formatSelection.source,
         verify: `Get-ChildItem -LiteralPath '${dirname(outputPath)}' | Sort-Object LastWriteTime -Descending | Select-Object -First 20`,
       };
     }
@@ -417,7 +811,7 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
       status: result?.status ?? 'queued',
       message: renderedDirectly
         ? `Sequence rendered directly by Premiere. Verified artifact: ${artifactPath ?? outputPath}.`
-        : 'Sequence queued in Adobe Media Encoder. The .epr preset controls the actual container and extension; verify the output directory rather than only the requested path.',
+        : `Sequence queued in Adobe Media Encoder${effectiveFormat ? ` for requested format "${effectiveFormat}"` : ''}. The selected .epr preset is "${presetName ?? presetResolution.presetName ?? presetPath}"; verify the actual artifact.`,
       sequenceId,
       outputPath,
       presetPath,
@@ -439,7 +833,9 @@ async function exportSequence(ctx: ToolContext, args: ExportSequenceArgs): Promi
       directWorkAreaType: result?.directWorkAreaType,
       mediaEncoderAvailable: result?.mediaEncoderAvailable,
       removeOnCompletion,
-      format,
+      requestedFormat: format,
+      format: effectiveFormat,
+      formatSource: formatSelection.source,
       quality,
       resolution,
       warnings: finalWarnings,

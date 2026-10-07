@@ -5,6 +5,7 @@
  * so the two cannot drift apart. Handlers reach Premiere through ToolContext.
  */
 import { z } from 'zod';
+import { join } from 'node:path';
 import type { ToolContext, ToolModule } from '../context.js';
 
 export const projectTools: ToolModule[] = [
@@ -27,7 +28,7 @@ export const projectTools: ToolModule[] = [
   },
   {
     name: 'save_project',
-    description: 'Saves the currently active Adobe Premiere Pro project.',
+    description: 'Saves the currently active Adobe Premiere Pro project. Uses saveAs(currentPath) because app.project.save() can report false success on affected Premiere builds.',
     inputSchema: z.object({}),
     run: (ctx) => saveProject(ctx),
   },
@@ -226,11 +227,12 @@ async function openProject(ctx: ToolContext, path: string): Promise<any> {
 
 async function saveProject(ctx: ToolContext): Promise<any> {
   try {
-    await ctx.bridge.saveProject();
-    return { 
-      success: true, 
+    const result = await ctx.bridge.saveProject();
+    return {
+      success: true,
       message: 'Project saved successfully',
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      ...(result && typeof result === 'object' ? result : {})
     };
   } catch (error) {
     return {
@@ -241,16 +243,29 @@ async function saveProject(ctx: ToolContext): Promise<any> {
 }
 
 async function saveProjectAs(ctx: ToolContext, name: string, location: string): Promise<any> {
+  const projectFileName = name.toLowerCase().endsWith('.prproj') ? name : `${name}.prproj`;
+  const newPath = join(location, projectFileName);
   const script = `
       try {
         var project = app.project;
-        var newPath = ${JSON.stringify(location)} + "/" + ${JSON.stringify(name)} + ".prproj";
+        var newPath = ${JSON.stringify(newPath)};
         project.saveAs(newPath);
-        
+
+        var savedFile = new File(newPath);
+        if (!savedFile.exists) {
+          return JSON.stringify({
+            success: false,
+            error: "saveAs completed but the project file does not exist.",
+            newPath: newPath
+          });
+        }
         return JSON.stringify({
           success: true,
           message: "Project saved as: " + newPath,
-          newPath: newPath
+          newPath: newPath,
+          exists: true,
+          length: savedFile.length,
+          modified: savedFile.modified ? savedFile.modified.getTime() : 0
         });
       } catch (e) {
         return JSON.stringify({

@@ -15,6 +15,12 @@ Use this skill when working with the Adobe Premiere Pro MCP server from `hetpate
 - Use real imported media. If the user asks to edit with assets, verify file paths exist, import them with `import_media`, then place the imported project item IDs on a sequence.
 - Keep the temp directory consistent across the MCP server and CEP panel: `/tmp/premiere-mcp-bridge` unless the user explicitly configured another path.
 - Ask before destructive or externally visible actions: deleting clips/media, overwriting exports, closing projects, saving over important project files, or sending files elsewhere.
+- Never force-terminate Premiere Pro or Adobe Media Encoder. Do not use
+  `Stop-Process -Force`, `taskkill /F`, or equivalent. Adobe treats that as an
+  unexpected exit and can show a recovery prompt on the next launch. If Premiere
+  must be restarted, ask the user to quit it from the UI. `CloseMainWindow()` is
+  allowed only with explicit user approval; if the process is still running,
+  stop and ask again instead of escalating to force.
 - For generated/demo edits, prefer creating a new clearly named sequence instead of modifying the user's active sequence.
 - If a tool returns `success: false`, report the exact error and run diagnostics before retrying blindly.
 
@@ -35,6 +41,14 @@ rules. Apply them before editing or diagnosing a live project.
   native backslashes. The preset, not the requested filename, determines the
   actual container, so inspect `method`, `directResult`, `outputExists`, and the
   output directory after export.
+- `export_sequence` / `add_to_render_queue` can submit several AME jobs in
+  parallel, but AME encodes queued jobs sequentially by default. The job IDs
+  returned by `encodeSequence` are submission receipts, not completion
+  receipts. Wait for the artifact and probe the actual file.
+- On Premiere 25.4, `app.project.save()` can return success while opening a
+  modal that says the project directory is not writable. The local build saves
+  with `saveAs(currentPath)` and verifies the file on disk. If an older build is
+  installed, use `save_project_as` to a fresh path instead of retrying Ctrl+S.
 - Media Encoder discovery is configurable. Use `PREMIERE_AME_PATH` or
   `ADOBE_AME_PATH` for an explicit executable/folder, and
   `PREMIERE_ADOBE_ROOT`, `ADOBE_ROOT`, or `ADOBE_HOME` for an Adobe install root
@@ -157,3 +171,38 @@ Common fixes:
 - `ENOENT` on temp directory: create `/tmp/premiere-mcp-bridge`, save config again, restart bridge.
 - Tool succeeds in Premiere but reports failure: run `list_sequences` or the relevant list tool to confirm state before retrying.
 - Empty or malformed temp directory config: set the field to the path only, not JSON or an env assignment.
+
+## Unexpected Exit While Opening a Project
+
+Treat Adobe's "unexpectedly quit" or project-recovery prompt as an unclean
+session, not as proof that the current project is corrupt.
+
+1. Do not delete, replace, or auto-repair the project. Capture the exact dialog
+   text, timestamp, and project path first.
+2. Check `%LOCALAPPDATA%\Temp\NGL\NGLClient_PremierePro*.log`. A clean exit
+   contains shutdown markers such as `Terminating session logs`; a log that
+   stops without them is consistent with a crash or forced termination.
+3. Check Windows `Application Error`, `Windows Error Reporting`, and
+   `%LOCALAPPDATA%\CrashDumps`. If there is no Premiere user-mode crash record,
+   do not claim that Premiere's code crashed.
+4. Treat any prior `Stop-Process -Force`, `taskkill /F`, or Task Manager
+   termination as the leading cause of the recovery prompt.
+5. A missing source file normally marks that clip offline; it does not, by
+   itself, explain an unexpected exit. Verify the `.prproj` decompresses as
+   valid XML and check referenced media separately.
+
+## Audio Output Device Warning On Project Open
+
+Premiere can load the project successfully and then show a modal titled
+`Premiere Pro`:
+
+`没有可用的输出设备。是否要打开“音频硬件”首选项？`
+
+- This is a Windows audio-endpoint warning, not a project crash or MCP failure.
+  The timeline may already be loaded behind the dialog.
+- Click `否` / `No` to dismiss it for this session. Do not enable
+  `不再显示` / `Don't show again` without explicit user approval.
+- Do not force-terminate Premiere to clear it.
+- If the user wants to fix the cause, check for active render endpoints with
+  `Get-PnpDevice -Class AudioEndpoint`. An empty result means Windows has no
+  active output device, even when audio services and sound cards are present.

@@ -1513,14 +1513,63 @@ export class PremiereProBridge implements PremiereProTransport {
     return await this.executeScript(script);
   }
 
-  async saveProject(): Promise<void> {
+  async saveProject(): Promise<any> {
     const script = `
-      // Save current project
-      app.project.save();
-      return JSON.stringify({ success: true });
+      try {
+        var project = app.project;
+        if (!project || !project.path) {
+          return JSON.stringify({ success: false, error: "No active project path is available for save." });
+        }
+        var projectPath = String(project.path);
+        if ($.os && $.os.toLowerCase().indexOf("windows") !== -1) {
+          projectPath = projectPath.replace(/\\//g, String.fromCharCode(92));
+        }
+        var before = null;
+        try {
+          var beforeFile = new File(projectPath);
+          if (beforeFile.exists) {
+            before = {
+              modified: beforeFile.modified ? beforeFile.modified.getTime() : 0,
+              length: beforeFile.length
+            };
+          }
+        } catch (eBefore) {}
+
+        // Premiere 25.4 can report success from app.project.save() while
+        // opening a modal that says the project directory is not writable.
+        // saveAs(currentPath) is the verified CEP-safe path.
+        project.saveAs(projectPath);
+
+        var afterFile = new File(projectPath);
+        if (!afterFile.exists) {
+          return JSON.stringify({
+            success: false,
+            error: "saveAs completed but the project file does not exist.",
+            path: projectPath
+          });
+        }
+        var after = {
+          modified: afterFile.modified ? afterFile.modified.getTime() : 0,
+          length: afterFile.length
+        };
+        return JSON.stringify({
+          success: true,
+          method: "saveAs",
+          path: projectPath,
+          before: before,
+          after: after,
+          changed: !before || before.modified !== after.modified || before.length !== after.length
+        });
+      } catch (e) {
+        return JSON.stringify({ success: false, error: e.toString() });
+      }
     `;
-    
-    await this.executeScript(script);
+
+    const result = await this.executeScript(script);
+    if (result && result.success === false) {
+      throw new Error(result.error || 'Premiere reported that the project could not be saved.');
+    }
+    return result;
   }
 
   async importMedia(filePath: string): Promise<PremiereProProjectItem> {

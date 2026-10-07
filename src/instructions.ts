@@ -19,6 +19,7 @@ export const MCP_SERVER_INSTRUCTIONS = [
   '',
   'Editing:',
   '- Inspect before mutating. Prefer list_sequences, search_tools for list_project_items / list_sequence_tracks, or the premiere://project/* resources unless the user already gave exact IDs.',
+  '- Never force-terminate Premiere Pro or Adobe Media Encoder. Do not use Stop-Process -Force, taskkill /F, or Task Manager to restart the host; Adobe records that as an unexpected exit and may show a recovery prompt on the next launch. Ask the user to quit from the UI instead.',
   '- Report real Premiere limitations instead of claiming success. Do not invent file paths, clip ids, or .mogrt/.sqpreset files.',
   '- replace_clip with preserveEffects (default true) restores trim, enabled, and Motion, and re-applies other effects. move_clip_to_track restores source in/out and refuses an occupied destination unless overwrite is true.',
 ].join('\n');

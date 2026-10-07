@@ -18,6 +18,7 @@ Operate Premiere through the `premiere-pro` MCP tools. Preserve the user's proje
 - Prefer read-only discovery before changing the project.
 - Use real imported media and concrete project item and sequence IDs.
 - Ask before deleting clips, tracks, sequences, media, overwriting exports, or saving over an important project.
+- Never force-terminate Premiere Pro or Adobe Media Encoder. Adobe treats that as an unexpected exit and may show a recovery prompt; ask the user to quit from the UI instead.
 - For generated edits, create a clearly named sequence instead of modifying the active sequence when practical.
 - Treat any `success: false` result as a stop condition. Run diagnostics or re-inspect state before retrying.
 - Verify an edit with the narrowest relevant read tool before reporting it complete.

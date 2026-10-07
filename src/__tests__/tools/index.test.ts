@@ -111,6 +111,38 @@ describe('PremiereProTools', () => {
   });
 
   describe('executeTool()', () => {
+    describe('project save', () => {
+      it('uses bridge.saveProject and surfaces the verified save method', async () => {
+        const projectRoot = join(tmpdir(), 'premiere-save-test');
+        mockBridge.saveProject.mockResolvedValue({
+          success: true,
+          method: 'saveAs',
+          path: join(projectRoot, 'Demo.prproj'),
+        });
+
+        const result = await tools.executeTool('save_project', {});
+
+        expect(mockBridge.saveProject).toHaveBeenCalledTimes(1);
+        expect(result.success).toBe(true);
+        expect(result.method).toBe('saveAs');
+      });
+
+      it('builds save_project_as with exactly one .prproj suffix', async () => {
+        const projectRoot = join(tmpdir(), 'premiere-save-test');
+        mockBridge.executeScript.mockResolvedValue({ success: true });
+
+        await tools.executeTool('save_project_as', {
+          name: 'Demo.prproj',
+          location: projectRoot,
+        });
+
+        const script = mockBridge.executeScript.mock.calls[0][0] as string;
+        const expectedPath = join(projectRoot, 'Demo.prproj');
+        expect(script).toContain(JSON.stringify(expectedPath));
+        expect(script).not.toContain('Demo.prproj.prproj');
+      });
+    });
+
     describe('marker colours', () => {
       // Premiere's setColorByIndex() order, verified against 26.0.2 by writing
       // each index and reading the rendered colour back off the timeline.

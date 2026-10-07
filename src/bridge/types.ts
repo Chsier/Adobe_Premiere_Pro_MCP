@@ -30,7 +30,7 @@ export interface PremiereProTransport {
   ensureHost?(options?: EnsureHostOptions): Promise<EnsureHostResult>;
   createProject(name: string, location: string): Promise<PremiereProProject>;
   openProject(path: string): Promise<PremiereProProject>;
-  saveProject(): Promise<void>;
+  saveProject(): Promise<any>;
   importMedia(filePath: string): Promise<PremiereProProjectItem>;
   createSequence(name: string, presetPath: string): Promise<PremiereProSequence>;
   addToTimeline(sequenceId: string, projectItemId: string, trackIndex: number, time: number, linkAudio?: boolean, sourceInPoint?: number, sourceOutPoint?: number, insertMode?: string): Promise<PremiereProClip>;

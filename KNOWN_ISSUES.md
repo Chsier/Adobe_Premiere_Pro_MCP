@@ -2,6 +2,17 @@
 
 This file tracks current, confirmed limits. It is no longer a backlog of already-fixed prototype bugs.
 
+## Safety Rule: Never Force-Terminate a Live Host
+
+Do not use `Stop-Process -Force`, `taskkill /F`, or an equivalent on
+`Adobe Premiere Pro.exe` or Adobe Media Encoder. A forced termination bypasses
+Adobe's normal shutdown path, so the next launch can show an "unexpectedly quit"
+or project-recovery prompt even when the project file itself is healthy.
+
+If a restart is required, ask the user to quit from the Premiere UI. A
+`CloseMainWindow()` request is acceptable only with explicit user approval; if
+the process remains alive, stop and ask again rather than escalating to force.
+
 ## Current State (August 13, 2026)
 
 The current built tool catalog exposes:

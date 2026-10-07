@@ -188,8 +188,7 @@ describe('ensureHost', () => {
     const restore = stubProcessPlatform('win32');
     try {
       const exe = path.win32.join(
-        'D:\\Support',
-        'Adobe',
+        'Z:\\AdobeRoot',
         'Pr',
         'Adobe Premiere Pro 2025',
         'Adobe Premiere Pro.exe',
@@ -219,7 +218,7 @@ describe('ensureHost', () => {
   it('finds Premiere under PREMIERE_INSTALL_ROOT on a nonstandard drive', async () => {
     const restore = stubProcessPlatform('win32');
     try {
-      const root = path.win32.join('D:\\Support', 'Adobe');
+      const root = path.win32.join('Z:\\AdobeRoot');
       const nested = path.win32.join(root, 'Pr', 'Adobe Premiere Pro 2025');
       const exe = path.win32.join(nested, 'Adobe Premiere Pro.exe');
       process.env.PREMIERE_INSTALL_ROOT = root;

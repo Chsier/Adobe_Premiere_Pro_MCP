@@ -160,7 +160,7 @@ describe('PremiereProBridge', () => {
   it('honours PREMIERE_ADOBE_ROOT when Media Encoder lives outside Program Files', async () => {
     const bridge = new PremiereProBridge();
     const previousRoot = process.env.PREMIERE_ADOBE_ROOT;
-    process.env.PREMIERE_ADOBE_ROOT = 'D:\\Support\\Adobe';
+    process.env.PREMIERE_ADOBE_ROOT = 'Z:\\AdobeRoot';
 
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.access.mockRejectedValue(new Error('Not found'));
@@ -169,8 +169,8 @@ describe('PremiereProBridge', () => {
     mockFs.unlink.mockResolvedValue(undefined);
     mockFs.readdir.mockImplementation(async (target: any) => {
       const value = String(target).replace(/\//g, '\\');
-      if (value === 'D:\\Support\\Adobe') return ['Adobe Media Encoder 2025'] as any;
-      if (value === 'D:\\Support\\Adobe\\Adobe Media Encoder 2025') {
+      if (value === 'Z:\\AdobeRoot') return ['Adobe Media Encoder 2025'] as any;
+      if (value === 'Z:\\AdobeRoot\\Adobe Media Encoder 2025') {
         return ['Adobe Media Encoder.exe'] as any;
       }
       return [] as any;

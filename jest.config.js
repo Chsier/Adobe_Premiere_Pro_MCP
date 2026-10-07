@@ -20,6 +20,7 @@ export default {
   },
   extensionsToTreatAsEsm: ['.ts'],
   moduleFileExtensions: ['ts', 'js', 'json', 'node'],
+  setupFilesAfterEnv: ['<rootDir>/test-setup/jest-env.ts'],
   testTimeout: 10000,
   verbose: true,
   transformIgnorePatterns: [

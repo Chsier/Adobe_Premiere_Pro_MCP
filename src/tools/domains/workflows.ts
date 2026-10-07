@@ -5,7 +5,9 @@
  * so the two cannot drift apart. Handlers reach Premiere through ToolContext.
  */
 import { z } from 'zod';
+import { join } from 'node:path';
 import { createMotionDemoAssets } from '../../utils/demoAssets.js';
+import { resolvePremiereTempDir } from '../../utils/tempDir.js';
 import type { ToolContext, ToolModule } from '../context.js';
 import { motionStyleSchema, clipPlanSchema } from '../schemas.js';
 import { listSequenceTracks } from './discovery.js';
@@ -126,8 +128,8 @@ interface BuildBrandSpotArgs extends AssembleProductSpotArgs {
 }
 
 async function buildMotionGraphicsDemo(ctx: ToolContext, sequenceName = 'Apple Like Motion Demo'): Promise<any> {
-  const assetBase = process.env.PREMIERE_TEMP_DIR || '/tmp';
-  const assetDir = `${assetBase.replace(/\/$/, '')}/motion-demo-${Date.now()}`;
+  const assetBase = resolvePremiereTempDir();
+  const assetDir = join(assetBase, `motion-demo-${Date.now()}`);
   const assets = await createMotionDemoAssets(assetDir);
 
   const imported = [];

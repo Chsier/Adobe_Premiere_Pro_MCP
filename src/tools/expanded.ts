@@ -5,6 +5,7 @@ import { basename, dirname, join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import type { PremiereProTransport } from '../bridge/types.js';
 import { bridgeUnavailableResult, isBridgeUnavailableMessage } from '../bridge/errors.js';
+import { resolvePremiereTempDir } from '../utils/tempDir.js';
 import type { MCPTool } from './types.js';
 
 export const expandedToolNames = [
@@ -367,7 +368,7 @@ function encodeRgbaPng(width: number, height: number, pixelAt: (x: number, y: nu
 }
 
 async function writeGeneratedPng(fileName: string, width: number, height: number, pixelAt: (x: number, y: number) => [number, number, number, number]): Promise<string> {
-  const outputDir = join(process.env.PREMIERE_TEMP_DIR || '/tmp/premiere-mcp-bridge', 'generated-assets');
+  const outputDir = join(resolvePremiereTempDir(), 'generated-assets');
   await fs.mkdir(outputDir, { recursive: true });
   const filePath = join(outputDir, fileName);
   await fs.writeFile(filePath, encodeRgbaPng(width, height, pixelAt));
@@ -559,7 +560,7 @@ async function deletePreviewFilesOnDisk(bridge: PremiereProTransport, args: Reco
     };
   }
 
-  const projectDir = info.projectPath ? dirname(String(info.projectPath)) : (process.env.PREMIERE_TEMP_DIR || '/tmp/premiere-mcp-bridge');
+  const projectDir = info.projectPath ? dirname(String(info.projectPath)) : resolvePremiereTempDir();
   const explicitDir = args.previewDir || args.previewPath || args.path;
   const candidates = [
     explicitDir ? String(explicitDir) : '',

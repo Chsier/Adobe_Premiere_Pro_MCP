@@ -4,6 +4,10 @@ All notable changes are documented here. Releases use semantic versioning.
 
 ## [Unreleased]
 
+- Server-side temporary paths now use a shared platform-aware resolver. On
+  Windows, `build_motion_graphics_demo`, generated bars, preview cleanup
+  fallback, and the live sweep no longer treat `/tmp` as a path on the current
+  drive (`D:\tmp`); they default to `%TEMP%\premiere-mcp-bridge`.
 - Legacy export format selection is now container- and codec-aware: `dv`
   requires an `AVIV` video preset, `mpeg2` prefers `mpg2`, `wmv` excludes
   `Audio Only`, `pcm` selects `RawPCM` and writes `.pcm`, and `gif` defaults to

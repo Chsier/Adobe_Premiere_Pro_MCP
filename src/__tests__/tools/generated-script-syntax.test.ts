@@ -1,4 +1,7 @@
 import { parse } from "acorn";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expandedToolNames, executeExpandedTool } from "../../tools/expanded";
 import { PremiereProTools } from "../../tools/index";
 import { seedArgs } from "../helpers/schema-args";
@@ -17,6 +20,20 @@ import { seedArgs } from "../helpers/schema-args";
  * So parse what is actually emitted, for every tool, rather than trusting that
  * the TypeScript compiled.
  */
+let testTempRoot: string;
+let previousTempDir: string | undefined;
+beforeAll(async () => {
+  testTempRoot = await fs.mkdtemp(join(tmpdir(), "premiere-generated-script-"));
+  previousTempDir = process.env.PREMIERE_TEMP_DIR;
+  process.env.PREMIERE_TEMP_DIR = testTempRoot;
+});
+
+afterAll(async () => {
+  if (previousTempDir === undefined) delete process.env.PREMIERE_TEMP_DIR;
+  else process.env.PREMIERE_TEMP_DIR = previousTempDir;
+  await fs.rm(testTempRoot, { recursive: true, force: true });
+});
+
 describe("generated ExtendScript is syntactically valid", () => {
   const capture = async (name: string): Promise<string> => {
     let script = "";

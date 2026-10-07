@@ -18,11 +18,11 @@ Then do this once inside Premiere Pro:
 1. Open `Premiere Pro > Preferences > Plugins` and enable **UXP Plugins > Enable developer mode**.
 2. Restart Premiere Pro if the setting was changed.
 3. Open `Window > Extensions > MCP Bridge (CEP)`.
-4. Set `Temp Directory` to `/tmp/premiere-mcp-bridge`.
+4. Set `Temp Directory` to `/tmp/premiere-mcp-bridge` on macOS/Linux, or `%TEMP%\premiere-mcp-bridge` on Windows.
 5. Click `Save Configuration`.
 6. Click `Start Bridge`.
 7. Click `Test Connection`.
-8. If it fails, click `Run Diagnostics` and send back `/tmp/premiere-mcp-bridge/premiere-mcp-diagnostics-latest.json`.
+8. If it fails, click `Run Diagnostics` and send back `premiere-mcp-diagnostics-latest.json` from that directory.
 
 Visual reference:
 
@@ -69,6 +69,9 @@ Add the MCP entry on one line:
 codex mcp add premiere_pro --env PREMIERE_TEMP_DIR=/tmp/premiere-mcp-bridge -- node /absolute/path/to/Adobe_Premiere_Pro_MCP/dist/index.js
 ```
 
+On Windows, use `PREMIERE_TEMP_DIR=%TEMP%\premiere-mcp-bridge` (or the
+PowerShell-expanded absolute path).
+
 If Adobe apps are installed outside the default locations, also set
 `PREMIERE_ADOBE_ROOT` to the Adobe install root or `PREMIERE_EXE_PATH` to the
 Premiere executable. The server also reads matching values from
@@ -78,7 +81,7 @@ Then:
 
 1. Restart the client.
 2. Open the Premiere CEP panel.
-3. Confirm the temp directory is `/tmp/premiere-mcp-bridge`.
+3. Confirm the temp directory is `/tmp/premiere-mcp-bridge` on macOS/Linux or `%TEMP%\premiere-mcp-bridge` on Windows.
 4. Click `Start Bridge`.
 
 ## Sanity Checks
@@ -110,7 +113,7 @@ That sweep creates disposable `Sweep ...` sequences so the live bridge is actual
 - Premiere is not open
 - no project is open
 - the CEP panel is not started
-- the temp directory in the panel is not `/tmp/premiere-mcp-bridge`
+- the temp directory in the panel does not match the OS or configured bridge directory
 - the panel needs a right-click `Reload` after bridge updates
 - diagnostics are available from the CEP panel via `Run Diagnostics`
 

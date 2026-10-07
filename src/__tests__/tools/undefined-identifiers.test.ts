@@ -22,6 +22,9 @@
  */
 
 import { parse } from 'acorn';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PremiereProTools } from '../../tools/index.js';
 import { expandedToolNames } from '../../tools/expanded.js';
 import { seedArgs, seedRequiredArgs } from '../helpers/schema-args.js';
@@ -122,6 +125,20 @@ function walk(node: Node, scope: Scope, offenders: Set<string>, parent?: Node, k
     }
   }
 }
+
+let testTempRoot: string;
+let previousTempDir: string | undefined;
+beforeAll(async () => {
+  testTempRoot = await fs.mkdtemp(join(tmpdir(), 'premiere-undefined-identifiers-'));
+  previousTempDir = process.env.PREMIERE_TEMP_DIR;
+  process.env.PREMIERE_TEMP_DIR = testTempRoot;
+});
+
+afterAll(async () => {
+  if (previousTempDir === undefined) delete process.env.PREMIERE_TEMP_DIR;
+  else process.env.PREMIERE_TEMP_DIR = previousTempDir;
+  await fs.rm(testTempRoot, { recursive: true, force: true });
+});
 
 describe('generated scripts declare everything they reference', () => {
   const capture = async (tool: { name: string }, args: Record<string, unknown>): Promise<string[]> => {

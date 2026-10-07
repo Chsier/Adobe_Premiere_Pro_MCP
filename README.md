@@ -186,7 +186,7 @@ Most recent completed local live validation:
 - `0` known parked or placeholder tools are advertised
 - `import_ae_comps` is intentionally not advertised because Premiere returned `false` for real `.aep` fixtures in this environment and a generic `.aep` import can wedge the CEP bridge
 
-The full live sweep output is written to `/tmp/premiere-mcp-bridge/live-tool-sweep.json` when you run the verifier.
+The full live sweep output is written to `live-tool-sweep.json` under the shared bridge directory (`/tmp/premiere-mcp-bridge` on macOS/Linux, `%TEMP%\premiere-mcp-bridge` on Windows).
 
 ## What You Get
 
@@ -275,7 +275,7 @@ For a real-host sweep, use a disposable Premiere project and run `node scripts/l
 
 1. The client calls an MCP tool.
 2. The Node server generates ExtendScript plus shared helpers.
-3. The script is written into `/tmp/premiere-mcp-bridge`.
+3. The script is written into the shared bridge directory.
 4. The CEP panel polls that directory and runs the script through `CSInterface.evalScript()`.
 5. The panel writes the result back to the response file.
 6. The server returns structured JSON to the MCP client.
@@ -453,7 +453,7 @@ If the tools are visible but calls fail:
 
 1. Confirm Premiere Pro is open with a project loaded.
 2. Open `Window > Extensions > MCP Bridge (CEP)`.
-3. Confirm the temp directory is exactly `/tmp/premiere-mcp-bridge`.
+3. Confirm the temp directory matches the server configuration (`/tmp/premiere-mcp-bridge` on macOS/Linux, `%TEMP%\premiere-mcp-bridge` on Windows).
 4. Click `Start Bridge`.
 5. If you updated the bridge code, right-click the panel and choose `Reload`.
 6. Retry the command.
@@ -461,7 +461,7 @@ If the tools are visible but calls fail:
 If the MCP client cannot find the server:
 
 1. Verify the absolute path to `dist/index.js`.
-2. Verify `PREMIERE_TEMP_DIR=/tmp/premiere-mcp-bridge`.
+2. Verify `PREMIERE_TEMP_DIR` matches the panel directory. The defaults are `/tmp/premiere-mcp-bridge` on macOS/Linux and `%TEMP%\premiere-mcp-bridge` on Windows.
 3. Restart the MCP client after changing config.
 4. Run `npm run setup:doctor`.
 

@@ -2,6 +2,9 @@
  * Integration tests for the MCP building blocks
  */
 
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PremiereProBridge } from '../../bridge/index.js';
 import { PremiereProTools } from '../../tools/index.js';
 import { PremiereProResources } from '../../resources/index.js';
@@ -45,6 +48,9 @@ describe('MCP Adobe Premiere Pro Integration', () => {
   });
 
   it('supports the high-level motion graphics demo workflow', async () => {
+    const demoRoot = await fs.mkdtemp(join(tmpdir(), 'premiere-integration-motion-demo-'));
+    const previousTempDir = process.env.PREMIERE_TEMP_DIR;
+    process.env.PREMIERE_TEMP_DIR = demoRoot;
     mockBridge.importMedia = jest
       .fn()
       .mockResolvedValueOnce({ success: true, id: 'item-1', name: '01_focus.png' } as any)
@@ -59,13 +65,20 @@ describe('MCP Adobe Premiere Pro Integration', () => {
       .mockResolvedValueOnce({ success: true, id: 'seq-1', name: 'Demo Sequence' })
       .mockResolvedValue({ success: true, videoTracks: [], audioTracks: [] });
 
-    const result = await tools.executeTool('build_motion_graphics_demo', {
-      sequenceName: 'Demo Sequence'
-    });
+    try {
+      const result = await tools.executeTool('build_motion_graphics_demo', {
+        sequenceName: 'Demo Sequence'
+      });
 
-    expect(result.success).toBe(true);
-    expect(result.sequence.id).toBe('seq-1');
-    expect(result.placements).toHaveLength(3);
+      expect(result.success).toBe(true);
+      expect(result.sequence.id).toBe('seq-1');
+      expect(result.placements).toHaveLength(3);
+      expect(result.assetDir.startsWith(demoRoot)).toBe(true);
+    } finally {
+      if (previousTempDir === undefined) delete process.env.PREMIERE_TEMP_DIR;
+      else process.env.PREMIERE_TEMP_DIR = previousTempDir;
+      await fs.rm(demoRoot, { recursive: true, force: true });
+    }
   }, 30000);
 
   it('supports assembling a product spot from real assets', async () => {

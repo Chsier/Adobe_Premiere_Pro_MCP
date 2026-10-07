@@ -29,6 +29,9 @@
  */
 
 import vm from 'vm';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parse } from 'acorn';
 import { PremiereProTools } from '../../tools/index.js';
 import {
@@ -124,6 +127,20 @@ function payloadRuns(script: string): boolean {
   }
   return sandbox.__OWNED === true;
 }
+
+let testTempRoot: string;
+let previousTempDir: string | undefined;
+beforeAll(async () => {
+  testTempRoot = await fs.mkdtemp(join(tmpdir(), 'premiere-injection-guard-'));
+  previousTempDir = process.env.PREMIERE_TEMP_DIR;
+  process.env.PREMIERE_TEMP_DIR = testTempRoot;
+});
+
+afterAll(async () => {
+  if (previousTempDir === undefined) delete process.env.PREMIERE_TEMP_DIR;
+  else process.env.PREMIERE_TEMP_DIR = previousTempDir;
+  await fs.rm(testTempRoot, { recursive: true, force: true });
+});
 
 describe('generated scripts cannot be broken out of', () => {
   it('survives a hostile value at every string position of every tool', async () => {

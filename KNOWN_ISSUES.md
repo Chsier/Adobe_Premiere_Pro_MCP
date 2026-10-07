@@ -241,7 +241,7 @@ Symptoms:
 Fix:
 
 1. Open `Window > Extensions > MCP Bridge (CEP)`.
-2. Confirm the temp directory is `/tmp/premiere-mcp-bridge`.
+2. Confirm the temp directory matches the server configuration. The server and panel default to `/tmp/premiere-mcp-bridge` on macOS/Linux and `%TEMP%\premiere-mcp-bridge` on Windows.
 3. Click `Start Bridge`.
 4. If bridge code changed, right-click the panel and choose `Reload`.
 
@@ -255,6 +255,11 @@ Use a scratch project if you do not want those fixtures in a working edit.
 
 These issues were real and are now resolved in the current code:
 
+- Server-side fallback paths no longer use the POSIX literal `/tmp` on Windows.
+  `build_motion_graphics_demo`, generated bars, preview cleanup fallback, and
+  the live sweep now share `resolvePremiereTempDir()`, which defaults to
+  `%TEMP%\premiere-mcp-bridge`. Tests use isolated temp directories and clean
+  them up instead of writing `motion-demo-*` folders into the current drive.
 - Legacy format selection now uses the correct first-party preset family:
   `dv` requires an `AVIV` video preset, `mpeg2` prefers `mpg2` over DVD/audio
   presets, `wmv` excludes `Audio Only`, `pcm` selects `RawPCM`, and `gif`

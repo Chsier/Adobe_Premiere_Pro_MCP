@@ -3,15 +3,17 @@
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { PremiereProBridge } from '../dist/bridge/index.js';
 import { PremiereProTools } from '../dist/tools/index.js';
 
-process.env.PREMIERE_TEMP_DIR = process.env.PREMIERE_TEMP_DIR || '/tmp/premiere-mcp-bridge';
+const defaultTempDir = path.join(tmpdir(), 'premiere-mcp-bridge');
+process.env.PREMIERE_TEMP_DIR = process.env.PREMIERE_TEMP_DIR || defaultTempDir;
 
 const bridge = new PremiereProBridge();
 const tools = new PremiereProTools(bridge);
 const runId = Date.now();
-const outputDir = process.env.PREMIERE_TEMP_DIR || '/tmp/premiere-mcp-bridge';
+const outputDir = process.env.PREMIERE_TEMP_DIR || defaultTempDir;
 const outputPath = path.join(outputDir, 'live-tool-sweep.json');
 const sequencePresetPath = process.env.PREMIERE_SEQUENCE_PRESET_PATH;
 
@@ -52,7 +54,7 @@ const externalFixtureSkips = new Set([
 ]);
 
 async function writeTextFixture(fileName, contents) {
-  const outputDir = process.env.PREMIERE_TEMP_DIR || '/tmp/premiere-mcp-bridge';
+  const outputDir = process.env.PREMIERE_TEMP_DIR || defaultTempDir;
   const filePath = path.join(outputDir, fileName);
   await fs.mkdir(outputDir, { recursive: true });
   await fs.writeFile(filePath, contents);
@@ -342,15 +344,15 @@ async function main() {
     sampleArgs.set('export_frame', {
       sequenceId: demoSequenceId,
       time: 1,
-      outputPath: `/tmp/premiere-mcp-bridge/sweep-frame-${runId}.png`,
+      outputPath: path.join(outputDir, `sweep-frame-${runId}.png`),
       format: 'png',
     });
     sampleArgs.set('export_as_fcp_xml', {
       sequenceId: demoSequenceId,
-      outputPath: `/tmp/premiere-mcp-bridge/sweep-${runId}.xml`,
+      outputPath: path.join(outputDir, `sweep-${runId}.xml`),
     });
     sampleArgs.set('import_fcp_xml', {
-      filePath: `/tmp/premiere-mcp-bridge/sweep-${runId}.xml`,
+      filePath: path.join(outputDir, `sweep-${runId}.xml`),
     });
     sampleArgs.set('create_subsequence', {
       sequenceId: demoSequenceId,
@@ -412,13 +414,13 @@ async function main() {
     });
     sampleArgs.set('export_sequence', {
       sequenceId: demoSequenceId,
-      outputPath: `/tmp/premiere-mcp-bridge/sweep-export-${runId}.mp4`,
+      outputPath: path.join(outputDir, `sweep-export-${runId}.mp4`),
       format: 'h264',
       quality: 'draft',
     });
     sampleArgs.set('add_to_render_queue', {
       sequenceId: demoSequenceId,
-      outputPath: `/tmp/premiere-mcp-bridge/sweep-render-queue-${runId}.mp4`,
+      outputPath: path.join(outputDir, `sweep-render-queue-${runId}.mp4`),
       startImmediately: false,
     });
     sampleArgs.set('batch_add_transitions', {

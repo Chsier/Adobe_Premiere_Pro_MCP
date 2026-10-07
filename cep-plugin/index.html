@@ -596,7 +596,7 @@
                 This must match the `PREMIERE_TEMP_DIR` value used by your MCP client.
             </div>
             <label for="tempDirectory">Temp Directory</label>
-            <input type="text" id="tempDirectory" placeholder="Temp Directory (e.g. /tmp/premiere-mcp-bridge)">
+            <input type="text" id="tempDirectory" placeholder="Temp Directory (Windows: %TEMP%\premiere-mcp-bridge; macOS/Linux: /tmp/premiere-mcp-bridge)">
             <label class="toggle-row" for="telemetryEnabled">
                 <input type="checkbox" id="telemetryEnabled" checked onchange="saveTelemetryPreference()">
                 <span class="toggle-copy">
@@ -644,7 +644,7 @@
             </div>
             <div class="log-container" id="logContainer">
                 <div class="log-entry info">MCP Bridge (CEP) loaded. The bridge starts automatically when this panel opens.</div>
-                <div class="log-entry info">Set the temp directory to match your MCP client if it is not already /tmp/premiere-mcp-bridge.</div>
+                <div class="log-entry info">Set the temp directory to match your MCP client. The Windows default is %TEMP%\premiere-mcp-bridge; the macOS/Linux default is /tmp/premiere-mcp-bridge.</div>
             </div>
         </section>
 

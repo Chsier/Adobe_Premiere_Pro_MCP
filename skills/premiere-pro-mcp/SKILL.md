@@ -13,7 +13,11 @@ Use this skill when working with the Adobe Premiere Pro MCP server from `hetpate
 - Default MCP `tools/list` is a small always-on set. Call `search_tools` (BM25 query or regex pattern), then `invoke_tool` with the exact name. `PREMIERE_MCP_TOOLSET=full` lists every tool.
 - Prefer read-only discovery first: `get_project_info`, `list_sequences`, `list_project_items`, `get_active_sequence`, and relevant resource reads.
 - Use real imported media. If the user asks to edit with assets, verify file paths exist, import them with `import_media`, then place the imported project item IDs on a sequence.
-- Keep the temp directory consistent across the MCP server and CEP panel: `/tmp/premiere-mcp-bridge` unless the user explicitly configured another path.
+- Keep the temp directory consistent across the MCP server and CEP panel. When
+  `PREMIERE_TEMP_DIR` is unset, the server uses
+  `join(os.tmpdir(), 'premiere-mcp-bridge')`, which is
+  `%TEMP%\premiere-mcp-bridge` on Windows; never assume the POSIX literal
+  `/tmp` will resolve to the platform temp directory.
 - Ask before destructive or externally visible actions: deleting clips/media, overwriting exports, closing projects, saving over important project files, or sending files elsewhere.
 - Never force-terminate Premiere Pro or Adobe Media Encoder. Do not use
   `Stop-Process -Force`, `taskkill /F`, or equivalent. Adobe treats that as an

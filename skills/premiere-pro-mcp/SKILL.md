@@ -53,6 +53,21 @@ rules. Apply them before editing or diagnosing a live project.
   presets and reports `source`, `container`, `exporterFileType`, and
   `formatTags`. Preset names can repeat across containers (`H264` MP4 and
   QuickTime `MooV`), so pass `format` or an exact path to disambiguate.
+- Legacy format aliases now select their first-party preset instead of a
+  misleading same-name or audio-only preset: `dv` uses an `AVIV` video preset,
+  `mpeg2` prefers `mpg2`, `wmv` excludes `Audio Only`, `pcm` uses `RawPCM`,
+  and `gif` defaults to `Animated GIF`. `pcm` writes a headerless `.pcm` file;
+  `gif` writes one animated `.gif`, not a GIF sequence.
+- Host limits are reported explicitly instead of as successful exports:
+  Adobe removed the FLV/F4V exporters, so a compatible FLV preset can fall
+  back to AAC-only output on Premiere 25.x; the Premiere 25.x script API also
+  returns a job ID for HEVC without writing an artifact. Use H.264 for the
+  scripted path, or export FLV/HEVC manually in Premiere when that codec is
+  required.
+- The 32-format matrix was live-tested on 2026-10-07 with Premiere 25.4.0 and
+  AME 25.6: 30 formats passed with `ffprobe`/bundle verification, FLV was
+  host-limited, and HEVC was a known host API failure. Re-run the matrix after
+  changing preset discovery or host versions.
 - On Premiere 25.4, `app.project.save()` can return success while opening a
   modal that says the project directory is not writable. The local build saves
   with `saveAs(currentPath)` and verifies the file on disk. If an older build is

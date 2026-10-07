@@ -44,6 +44,30 @@ async function createTempPreset(name = 'Test Preset'): Promise<{ root: string; p
   return { root, presetPath, outputPath: join(root, 'out.mp4') };
 }
 
+async function createTempPresetFixture(
+  root: string,
+  fileName: string,
+  name: string,
+  exporterFileType: string,
+  hasVideo = true,
+  hasAudio = true,
+): Promise<string> {
+  const presetPath = join(root, fileName);
+  await fs.writeFile(
+    presetPath,
+    [
+      '<Preset>',
+      `<PresetName>${name}</PresetName>`,
+      `<ExporterFileType>${exporterFileType}</ExporterFileType>`,
+      `<DoVideo>${hasVideo}</DoVideo>`,
+      `<DoAudio>${hasAudio}</DoAudio>`,
+      '</Preset>',
+    ].join(''),
+    'utf8',
+  );
+  return presetPath;
+}
+
 describe('PremiereProTools', () => {
   let tools: PremiereProTools;
   let mockBridge: jest.Mocked<PremiereProBridge>;
@@ -2376,7 +2400,7 @@ describe('PremiereProTools', () => {
       const presetPath = join(presetDir, '00 - Match Source - High bitrate.epr');
       await fs.writeFile(
         presetPath,
-        '<Preset><PresetName>Match Source - High bitrate</PresetName><ExporterFileType>1211250228</ExporterFileType></Preset>',
+        '<Preset><PresetName>Match Source - High bitrate</PresetName><ExporterFileType>1211250228</ExporterFileType><DoVideo>true</DoVideo><DoAudio>true</DoAudio></Preset>',
         'utf8',
       );
 
@@ -2392,6 +2416,8 @@ describe('PremiereProTools', () => {
         source: 'system',
         exporterFileType: 'H264',
         container: 'mp4',
+        hasVideo: true,
+        hasAudio: true,
       }));
       expect(result.presets[0].formatTags).toEqual(expect.arrayContaining(['h264', 'mp4']));
     });
@@ -2483,6 +2509,115 @@ describe('PremiereProTools', () => {
         requestedFormat: 'mp4',
         exporterFileType: 'H264',
       }));
+    });
+
+    it('selects first-party video presets instead of misleading legacy or audio-only presets', async () => {
+      const root = await fs.mkdtemp(join(tmpdir(), 'premiere-format-selection-'));
+      const cases = [
+        {
+          format: 'dv',
+          outputName: 'out.avi',
+          expectedName: 'NTSC DV',
+          presets: [
+            { name: 'NTSC DV High Quality', fileName: 'bad-dv.epr', exporterFileType: 'mpg2', container: 'mpeg2', tags: ['dv', 'mpeg2'] },
+            { name: 'NTSC DV', fileName: 'good-dv.epr', exporterFileType: 'AVIV', container: 'avi', tags: ['avi', 'aviv', 'dv'] },
+          ],
+        },
+        {
+          format: 'mpeg2',
+          outputName: 'out.mpg',
+          expectedName: '01 - Match Source - High bitrate',
+          presets: [
+            { name: 'Match Source Attributes (High Quality)', fileName: 'bad-mpeg2.epr', exporterFileType: 'dvd', container: 'mpeg2', tags: ['dvd', 'mpeg2'] },
+            { name: '01 - Match Source - High bitrate', fileName: 'good-mpeg2.epr', exporterFileType: 'mpg2', container: 'mpeg2', tags: ['mpeg2', 'mpg2'] },
+          ],
+        },
+        {
+          format: 'wmv',
+          outputName: 'out.wmv',
+          expectedName: 'HD 1080p 29.97',
+          presets: [
+            { name: 'Audio Only, 44.1 kHz 64 kbps', fileName: 'bad-wmv.epr', exporterFileType: 'WMV', container: 'wmv', tags: ['wmv'], hasVideo: false },
+            { name: 'HD 1080p 29.97', fileName: 'good-wmv.epr', exporterFileType: 'WMV', container: 'wmv', tags: ['wmv'], hasVideo: true },
+          ],
+        },
+        {
+          format: 'pcm',
+          outputName: 'out.pcm',
+          expectedName: 'RawPCM 48 kHz',
+          presets: [
+            { name: 'AIFF 48 kHz', fileName: 'bad-pcm.epr', exporterFileType: 'AIFF', container: 'aiff', tags: ['aiff'], hasVideo: false },
+            { name: 'RawPCM 48 kHz', fileName: 'good-pcm.epr', exporterFileType: 'PCM', container: 'pcm', tags: ['pcm'], hasVideo: false },
+          ],
+        },
+        {
+          format: 'gif',
+          outputName: 'out.gif',
+          expectedName: 'Animated GIF (Match Source)',
+          presets: [
+            { name: 'GIF Sequence (Match Source)', fileName: 'bad-gif.epr', exporterFileType: 'GIFf', container: 'gif', tags: ['gif'] },
+            { name: 'Animated GIF (Match Source)', fileName: 'good-gif.epr', exporterFileType: 'GIFf', container: 'gif', tags: ['gif'] },
+          ],
+        },
+        {
+          format: 'flv',
+          outputName: 'out.flv',
+          expectedName: 'Web - 1920x1080, 29.97 fps, 7500 kbps',
+          presets: [
+            { name: 'Web - 640x480, 29.97 fps, 800 kbps', fileName: 'bad-flv.epr', exporterFileType: 'flv', container: 'flv', tags: ['flv'] },
+            { name: 'Web - 1920x1080, 29.97 fps, 7500 kbps', fileName: 'good-flv.epr', exporterFileType: 'flv', container: 'flv', tags: ['flv'] },
+          ],
+        },
+      ];
+      const presets: discovery.EncoderPresetEntry[] = [];
+      const expectedPaths = new Map<string, string>();
+      for (const spec of cases) {
+        for (const preset of spec.presets) {
+          const presetPath = await createTempPresetFixture(
+            root,
+            preset.fileName,
+            preset.name,
+            preset.exporterFileType,
+            preset.hasVideo !== false,
+            true,
+          );
+          presets.push({
+            name: preset.name,
+            path: presetPath,
+            source: 'system',
+            ameVersion: '2025',
+            exporterFileType: preset.exporterFileType,
+            container: preset.container,
+            formatTags: preset.tags,
+            hasVideo: preset.hasVideo !== false,
+            hasAudio: true,
+          });
+          expectedPaths.set(`${spec.format}:${spec.expectedName}`, presetPath);
+        }
+      }
+      jest.spyOn(discovery, 'getEncoderPresets').mockResolvedValue({
+        success: true,
+        presets,
+        count: presets.length,
+        userCount: 0,
+        systemCount: presets.length,
+        searchedDirectories: [root],
+        errors: [],
+        formats: [...new Set(presets.flatMap((preset) => preset.formatTags ?? []))],
+        factoryPresets: { supported: true, note: 'test' },
+      });
+      mockBridge.renderSequence.mockResolvedValue({ success: true, queued: true, jobID: 'job-format-selection' });
+
+      for (const spec of cases) {
+        const result = await tools.executeTool('export_sequence', {
+          sequenceId: 'seq-1',
+          outputPath: join(root, spec.outputName),
+          format: spec.format,
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.presetPath).toBe(expectedPaths.get(`${spec.format}:${spec.expectedName}`));
+      }
     });
 
     it('rejects a MOV preset when the explicit format is MP4 instead of silently writing the wrong container', async () => {

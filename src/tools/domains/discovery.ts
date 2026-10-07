@@ -143,6 +143,8 @@ export interface EncoderPresetEntry {
   exporterFileType?: string;
   container?: string;
   formatTags?: string[];
+  hasVideo?: boolean;
+  hasAudio?: boolean;
 }
 
 interface EncoderPresetDiscovery {
@@ -818,6 +820,12 @@ function exporterFileTypeFromXml(xml: string): string | undefined {
   return normaliseFourCc(raw) || undefined;
 }
 
+function presetBooleanFromXml(xml: string, tagName: string): boolean | undefined {
+  const match = new RegExp(`<${tagName}[^>]*>\\s*(true|false)\\s*</${tagName}>`, 'i').exec(xml);
+  if (!match?.[1]) return undefined;
+  return match[1].toLowerCase() === 'true';
+}
+
 function exporterFileTypeFromDirectory(presetPath: string): string | undefined {
   const directoryName = basename(dirname(presetPath));
   const match = /_([0-9a-f]{8})$/i.exec(directoryName);
@@ -961,6 +969,10 @@ function buildEncoderPresetEntry(
   };
   if (exporterFileType) entry.exporterFileType = exporterFileType;
   if (container) entry.container = container;
+  const hasVideo = presetBooleanFromXml(xml, 'DoVideo');
+  const hasAudio = presetBooleanFromXml(xml, 'DoAudio');
+  if (hasVideo !== undefined) entry.hasVideo = hasVideo;
+  if (hasAudio !== undefined) entry.hasAudio = hasAudio;
   return entry;
 }
 

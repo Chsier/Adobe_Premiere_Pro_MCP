@@ -34,6 +34,41 @@ Run `node scripts/live-tool-sweep.mjs` against a scratch Premiere project before
 
 ## Confirmed Runtime Limitation
 
+### FLV/F4V export was removed by Adobe
+
+Status: host limitation, not an MCP bug
+
+- Adobe removed the FLV and F4V exporters from Premiere Pro, After Effects, and
+  Adobe Media Encoder. Legacy `.epr` files can remain visible even though the
+  exporter is gone.
+- On Premiere 25.4.0 with AME 25.6, requesting `format: "flv"` selected the
+  correct 1920x1080 FLV preset but wrote only `output.aac`; a direct
+  `exportAsMediaDirect()` call failed with `Unknown error exception`.
+- `export_sequence` now classifies this as a host limitation when it sees the
+  AAC-only artifact. Use H.264 for scripted delivery, or export FLV manually
+  from an older Adobe version that still ships the exporter.
+
+Reference:
+https://community.adobe.com/questions-529/adobe-cc-and-flv-export-72577
+
+### Premiere 25.x scripted HEVC export returns a job ID but writes nothing
+
+Status: host API bug, not an MCP preset-selection bug
+
+- `app.encoder.encodeSequence()` accepts an HEVC preset and returns a job ID,
+  but Adobe Media Encoder produces no artifact. The same symptom is reported
+  for `encodeFile()` and `encodeProjectItem()` on Premiere 25.5 with H.265
+  presets; switching the preset to H.264 makes the same call work.
+- Reproduced on this workstation with Premiere 25.4.0 and AME 25.6 on three
+  different sequences. The selected preset was `01 - Match Source - High
+  Bitrate` with `ExporterFileType=HEVC`, and no file appeared after 180 seconds.
+- The MCP cannot repair an exporter that the host does not execute. Use H.264
+  for scripted exports or export HEVC through Premiere's own UI until Adobe
+  fixes the API path.
+
+Reference:
+https://community.adobe.com/t5/premiere-pro-discussions/premiere-25-5-0-app-encoder-export-methods-don-t-work-for-h265-presets/m-p/15522206
+
 ### `detect_silence` requires ffmpeg on PATH, and does not use Premiere's scripting API at all
 
 Status: by design, not a bug
@@ -220,6 +255,12 @@ Use a scratch project if you do not want those fixtures in a working edit.
 
 These issues were real and are now resolved in the current code:
 
+- Legacy format selection now uses the correct first-party preset family:
+  `dv` requires an `AVIV` video preset, `mpeg2` prefers `mpg2` over DVD/audio
+  presets, `wmv` excludes `Audio Only`, `pcm` selects `RawPCM`, and `gif`
+  defaults to Animated GIF instead of a GIF sequence. A 32-format live matrix
+  verified 30 passing formats, with FLV and HEVC reported as host limitations
+  rather than false successes.
 - `export_sequence` treated `format` as a deprecated hint and only accepted a
   user preset path. A same-name H.264 preset could therefore silently write a
   `.mov` file when `.mp4` was requested. The tool now discovers installed AME

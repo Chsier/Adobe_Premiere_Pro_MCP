@@ -187,7 +187,7 @@ const FORMAT_EXTENSIONS: Record<string, string[]> = {
   hdv: ['.m2t', '.m2ts', '.ts'],
   dv: ['.avi', '.mov', '.mxf'],
   wav: ['.wav'],
-  pcm: ['.wav', '.aif', '.aiff', '.pcm'],
+  pcm: ['.pcm', '.raw', '.wav', '.aif', '.aiff'],
   aiff: ['.aif', '.aiff'],
   mp3: ['.mp3'],
   aac: ['.aac', '.m4a'],
@@ -224,6 +224,8 @@ const OUTPUT_EXTENSION_FORMATS: Record<string, string> = {
   '.mp3': 'mp3',
   '.aac': 'aac',
   '.m4a': 'aac',
+  '.pcm': 'pcm',
+  '.raw': 'pcm',
   '.png': 'png',
   '.tif': 'tiff',
   '.tiff': 'tiff',
@@ -235,6 +237,29 @@ const OUTPUT_EXTENSION_FORMATS: Record<string, string> = {
   '.tga': 'tga',
   '.gif': 'gif',
 };
+
+const VIDEO_FORMATS = new Set([
+  'mp4',
+  'mov',
+  'avi',
+  'mxf',
+  'dcp',
+  'flv',
+  'wmv',
+  'mpeg2',
+  'h264',
+  'hevc',
+  'prores',
+  'dnx',
+  'dnxhd',
+  'dnxhr',
+  'avcintra',
+  'xavc',
+  'xdcam',
+  'hdv',
+  'dv',
+  'gif',
+]);
 
 function normalizeRequestedFormat(value?: string): string | undefined {
   if (!value || !value.trim()) return undefined;
@@ -256,6 +281,13 @@ function supportedPresetFormats(presets: EncoderPresetEntry[]): string[] {
 function presetMatchesFormat(preset: EncoderPresetEntry, requestedFormat: string): boolean {
   const format = normalizeRequestedFormat(requestedFormat) ?? requestedFormat;
   const tags = new Set((preset.formatTags ?? []).map((tag) => normalizeRequestedFormat(tag) ?? tag));
+  if (VIDEO_FORMATS.has(format) && preset.hasVideo === false) return false;
+  if (format === 'dv') {
+    return preset.exporterFileType === 'AVIV' && (tags.has('dv') || preset.container === 'avi');
+  }
+  if (format === 'pcm') {
+    return preset.exporterFileType === 'PCM' || tags.has('pcm');
+  }
   if (tags.has(format)) return true;
 
   switch (format) {
@@ -297,8 +329,6 @@ function presetMatchesFormat(preset: EncoderPresetEntry, requestedFormat: string
       return tags.has('hdv');
     case 'dv':
       return tags.has('dv');
-    case 'pcm':
-      return tags.has('pcm') || preset.container === 'wav' || preset.container === 'aiff';
     default:
       return false;
   }
@@ -335,6 +365,34 @@ function presetFormatScore(preset: EncoderPresetEntry, requestedFormat: string):
   if (format === 'wav' && /waveform|48khz|16-bit/.test(text)) score += 250;
   if (format === 'mp3' && /192|256|high quality/.test(text)) score += 180;
   if (format === 'png' && /match source/.test(text) && !/alpha/.test(text)) score += 120;
+  if (format === 'dv') {
+    if (preset.exporterFileType === 'AVIV') score += 800;
+    if (/^ntsc dv$/.test(name)) score += 500;
+    else if (/^pal dv$/.test(name)) score += 450;
+    else if (/widescreen/.test(name)) score += 100;
+    if (/24p/.test(name)) score -= 100;
+  }
+  if (format === 'mpeg2') {
+    if (preset.exporterFileType === 'mpg2') score += 900;
+    if (preset.exporterFileType === 'dvd') score -= 700;
+    if (preset.exporterFileType === 'mbd') score -= 300;
+  }
+  if (format === 'wmv') {
+    if (/1080p/.test(name)) score += 300;
+    else if (/720p/.test(name)) score += 200;
+    if (/29\.97/.test(name)) score += 60;
+    if (/half|ntsc dv|pal dv/.test(name)) score -= 250;
+  }
+  if (format === 'gif') {
+    if (/^animated gif/.test(name)) score += 900;
+    else if (/sequence/.test(name)) score -= 900;
+    if (/transparency/.test(name)) score -= 30;
+  }
+  if (format === 'flv') {
+    if (/1920x1080/.test(name)) score += 250;
+    else if (/640x480/.test(name)) score -= 250;
+    if (/29\.97/.test(name)) score += 40;
+  }
 
   if (/proxy|\blb\b|low bitrate|medium bitrate|draft|middle|mono|stereo/.test(text)) score -= 220;
   if (/hlg|\bpq\b|2020|alpha/.test(text)) score -= 120;

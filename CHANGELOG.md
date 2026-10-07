@@ -4,6 +4,11 @@ All notable changes are documented here. Releases use semantic versioning.
 
 ## [Unreleased]
 
+- Legacy export format selection is now container- and codec-aware: `dv`
+  requires an `AVIV` video preset, `mpeg2` prefers `mpg2`, `wmv` excludes
+  `Audio Only`, `pcm` selects `RawPCM` and writes `.pcm`, and `gif` defaults to
+  an animated GIF instead of a GIF sequence. Added live-verified handling for
+  the Adobe-removed FLV exporter and the Premiere 25.x HEVC script API failure.
 - `export_sequence` now defaults to AME-first export and treats `format` as a
   real selector. Installed AME system presets are discovered recursively, their
   `ExporterFileType` FourCC is parsed, and an automatic format chooses a
